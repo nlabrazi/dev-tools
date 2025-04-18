@@ -58,7 +58,7 @@ No external dependencies required.
 python daily_commit_and_changelog.py
 ```
 
-Youâ€™ll be asked to confirm each commit and push.
+You'll be asked to confirm each commit and push.
 Perfect for wrapping up your coding day across all your personal or work repositories.
 
 ---
