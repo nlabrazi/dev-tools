@@ -85,13 +85,13 @@ def auto_commit_all_repos(root_dir):
         subprocess.run(["git", "add", "."], cwd=repo_path)
         subprocess.run(["git", "commit", "-m", message], cwd=repo_path)
         results["committed"] += 1
-        print(f"✅ Commit done.")
+        print(f"✅ Commit done.\n")
 
         push_input = input("📤 Do you want to push to staging? (y/n): ").strip().lower()
         if push_input == "y":
             subprocess.run(["git", "push", "origin", DEFAULT_BRANCH], cwd=repo_path)
             results["pushed"] += 1
-            print("🚀 Pushed to staging branch")
+            print("🚀 Pushed to staging branch\n")
         else:
             print("⏭️ Skipped git push")
 

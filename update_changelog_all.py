@@ -2,7 +2,7 @@ import os
 import subprocess
 from datetime import datetime
 
-ROOT_DIR = os.path.expanduser("~/code/pers")  # À adapter si besoin
+ROOT_DIR = os.path.expanduser("~/code/pers")
 CHANGELOG_FILENAME = "CHANGELOG.md"
 
 EMOJI_MAP = {
@@ -69,7 +69,7 @@ def git_push_staging(path):
         subprocess.run(["git", "add", CHANGELOG_FILENAME], cwd=path)
         subprocess.run(["git", "commit", "-m", "chore: update changelog"], cwd=path)
         subprocess.run(["git", "push", "origin", "staging"], cwd=path)
-        print("🚀 Pushed to staging branch")
+        print("🚀 Pushed to staging branch\n")
     except Exception as e:
         print(f"❌ Git push failed: {e}")
 
@@ -97,7 +97,7 @@ def update_all_repos_interactive(root_dir):
         if user_input == "y":
             if write_changelog(repo_path, preview):
                 updated += 1
-                print(f"✅ CHANGELOG.md updated for {repo}")
+                print(f"✅ CHANGELOG.md updated for {repo}\n")
                 push_input = input("📤 Do you want to push to staging? (y/n): ").lower()
                 if push_input == "y":
                     git_push_staging(repo_path)
