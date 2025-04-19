@@ -69,7 +69,7 @@ def auto_commit_all_repos(root_dir):
             print(f"⚪ {repo}: No changes to commit")
             continue
 
-        print(f"\n📦 Committing for {repo}...")
+        print(f"\n📦 Committing for [bold green]{repo}...")
         commit_type = detect_commit_type(modified)
         message = preview_commit_message(commit_type)
 

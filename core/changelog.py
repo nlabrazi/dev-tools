@@ -1,6 +1,7 @@
 import os
 import subprocess
 from datetime import datetime
+from rich import print
 
 ROOT_DIR = os.path.expanduser("~/code/pers")
 CHANGELOG_FILENAME = "CHANGELOG.md"
@@ -26,15 +27,43 @@ def get_repo_name(path):
 
 def get_commits(path):
     try:
+        # Trouve le dernier commit contenant "update changelog"
         result = subprocess.run(
-            ["git", "log", "--pretty=format:%s", "--no-merges"],
+            ["git", "log", "--grep=update changelog", "-n", "1", "--pretty=format:%H"],
+            cwd=path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True
+        )
+        last_changelog_commit = result.stdout.strip()
+
+        # Si un commit changelog est trouvé, on ne prend que les commits après
+        if last_changelog_commit:
+            log_range = f"{last_changelog_commit}..HEAD"
+        else:
+            log_range = "HEAD"  # Si aucun changelog existant, on prend tout
+
+        # Récupère les messages (hors merge)
+        result = subprocess.run(
+            ["git", "log", log_range, "--pretty=format:%s", "--no-merges"],
             cwd=path,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True
         )
         raw_commits = result.stdout.strip().split("\n")
-        return [add_emoji_to_commit(c) for c in raw_commits if c]
+
+        # Nettoyage des messages vides ou inutiles
+        filtered = [
+            c for c in raw_commits
+            if c and "update changelog" not in c.lower()
+        ]
+
+        # Si aucun commit utile, on retourne une liste vide
+        if not filtered:
+            return []
+
+        return [add_emoji_to_commit(c) for c in filtered]
     except Exception:
         return []
 
@@ -82,7 +111,7 @@ def update_all_repos_interactive(root_dir):
         if not os.path.isdir(repo_path) or not is_git_repo(repo_path):
             continue
 
-        print(f"\n📘 Updating changelog for {repo}...")
+        print(f"\n📘 Updating changelog for [bold cyan]{repo}...")
         commits = get_commits(repo_path)
         if not commits:
             print(f"⚠️ No new commits found")
@@ -97,16 +126,16 @@ def update_all_repos_interactive(root_dir):
         if user_input == "y":
             if write_changelog(repo_path, preview):
                 updated += 1
-                print(f"✅ CHANGELOG.md updated for {repo}\n")
+                print(f"✅ CHANGELOG.md updated for [bold cyan]{repo}\n")
                 push_input = input("📤 Do you want to push to staging? (y/n): ").lower()
                 if push_input == "y":
                     git_push_staging(repo_path)
                 else:
                     print("⏭️ Skipped git push")
             else:
-                print(f"❌ Failed to write changelog for {repo}")
+                print(f"❌ Failed to write changelog for [bold cyan]{repo}")
         else:
-            print(f"⏹️ Skipped writing for {repo}")
+            print(f"⏹️ Skipped writing for [bold cyan]{repo}")
 
     return updated
 

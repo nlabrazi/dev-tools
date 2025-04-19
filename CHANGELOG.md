@@ -1,5 +1,14 @@
 # 📅 CHANGELOG
 
+## [Unreleased] - 2025-04-19
+
+- ✨ Project reorganization with `core/` folder
+- 🚀 New `run.py` orchestrator with clean figlet sections and Rich UI
+- 🔁 `core/merge.py`: interactive GitHub CLI merge with preview and auto-merge
+- 🟠 Color support: repo names in orange + clear section spacing
+- ✅ Fixed changelog generation to skip when no new commits exist
+- ✅ Clean import usage in `run.py`, calling `core.merge.main()` correctly
+
 ## [Unreleased] - 2025-04-18
 
 - ✨ Initial release: automatic commit and changelog automation
