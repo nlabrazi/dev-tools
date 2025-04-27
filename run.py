@@ -7,7 +7,10 @@ from core.changelog import update_all_repos_interactive
 import core.merge as merge
 import os
 
-ROOT_DIR = os.path.expanduser("~/code/pers")
+ROOT_DIRS = [
+    os.path.expanduser("~/code/pers"),
+    os.path.expanduser("~/code/bricolage")
+]
 console = Console()
 
 def section_title(title, emoji):
@@ -22,13 +25,13 @@ if __name__ == "__main__":
     section_title("Auto-commit staging", "🔧")
     run_commit = input("Run auto-commit on all repos? (y/n): ").strip().lower()
     if run_commit == "y":
-        auto_commit_all_repos(ROOT_DIR)
+        auto_commit_all_repos(ROOT_DIRS)
 
     # --- STEP 2: CHANGELOG ---
     section_title("Update changelogs", "📝")
     run_changelog = input("Update changelogs? (y/n): ").strip().lower()
     if run_changelog == "y":
-        update_all_repos_interactive(ROOT_DIR)
+        update_all_repos_interactive(ROOT_DIRS)
 
     # --- STEP 3: MERGE ---
     section_title("Merge to master", "🔁")
