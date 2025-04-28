@@ -5,7 +5,6 @@ from collections import defaultdict
 from rich import print
 from rich.panel import Panel
 from rich.console import Console
-from rich.spinner import Spinner
 
 console = Console()
 
@@ -110,16 +109,11 @@ def update_changelog(repo_path, changelog_content):
             f.write(changelog_content)
 
 def commit_and_push_changelog(repo_path):
-    spinner = Spinner("dots", text="Committing and pushing changelog...")
-    console.print(spinner, end="")
-
-    try:
+    with console.status("[bold green]Committing and pushing changelog...", spinner="dots"):
         subprocess.run(["git", "add", CHANGELOG_FILENAME], cwd=repo_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["git", "commit", "-m", f"docs: update changelog ({datetime.now().strftime('%Y-%m-%d %H:%M')})"], cwd=repo_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.run(["git", "push"], cwd=repo_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        spinner.update(text="[green]✅ Changelog committed and pushed.[/green]")
-    except Exception as e:
-        spinner.update(text=f"[red]❌ Error during commit/push: {e}[/red]")
+    print("[green]✅ Changelog committed and pushed.[/green]")
 
 def update_all_repos_interactive(root_dirs):
     print(f"\n🔄 Scanning repos for changelog updates\n")
@@ -153,7 +147,6 @@ def update_all_repos_interactive(root_dirs):
                 update_changelog(repo_path, changelog_preview)
                 print(f"✅ Changelog updated for {repo}")
 
-                # Nouveau prompt pour commit/push
                 commit_input = input("📤 Do you want to commit and push the changelog? (y/n): ").strip().lower()
                 if commit_input == "y":
                     commit_and_push_changelog(repo_path)

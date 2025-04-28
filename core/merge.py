@@ -4,7 +4,6 @@ from datetime import datetime
 from time import sleep
 from rich import print
 from rich.console import Console
-from rich.spinner import Spinner
 
 ROOT_DIRS = [
     os.path.expanduser("~/code/pers"),
@@ -30,11 +29,8 @@ def run_git_command(path, args):
 
 def repo_has_diff_between_staging_and_master(path):
     subprocess.run(["git", "fetch"], cwd=path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    # Utilisation de merge-base pour vérifier si staging est en avance
     base_commit = run_git_command(path, ["merge-base", f"origin/{DEFAULT_BASE_BRANCH}", f"origin/{DEFAULT_HEAD_BRANCH}"])
     head_commit = run_git_command(path, ["rev-parse", f"origin/{DEFAULT_HEAD_BRANCH}"])
-
     return base_commit != head_commit
 
 def get_commit_summary(path):
@@ -42,18 +38,24 @@ def get_commit_summary(path):
 
 def create_and_merge_pr(path, repo_name):
     date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    title = f"chore: merge staging into master ({date_str})"
+    title = f"🔀 chore: merge staging into master ({date_str})"
     commit_summary = get_commit_summary(path)
 
     if not commit_summary:
         print("⚠️  No new commits found to merge.")
         return
 
-    body = f"""This pull request merges the latest validated commits from `staging` into `master`.
+    body = f"""## 📦 Merge Summary
 
-**Summary of changes:**
+This pull request merges the latest validated commits from `staging` into `master`.
+
+---
+
+**✨ Commits included:**
 
 {commit_summary}
+
+---
 
 _Auto-generated on {date_str}_
 """
@@ -65,9 +67,7 @@ _Auto-generated on {date_str}_
         print("❌ Skipped.")
         return
 
-    # Création de la PR
-    spinner = console.status("[bold green]Creating pull request...", spinner="dots")
-    with spinner:
+    with console.status("[bold green]Creating pull request...", spinner="dots"):
         result = subprocess.run(
             ["gh", "pr", "create", "--base", DEFAULT_BASE_BRANCH, "--head", DEFAULT_HEAD_BRANCH, "--title", title, "--body", body],
             cwd=path,
@@ -87,30 +87,14 @@ _Auto-generated on {date_str}_
         print(f"❌ Failed to create Pull Request for {repo_name}")
         return
 
-    # Merge automatique de la PR
-    spinner = console.status("[bold cyan]Merging pull request...", spinner="dots")
-    with spinner:
-        subprocess.run(["gh", "pr", "merge", "--merge", "--auto"], cwd=path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with console.status("[bold cyan]Merging pull request...", spinner="dots"):
+        merge_result = subprocess.run(["gh", "pr", "merge", "--merge", "--auto"], cwd=path, capture_output=True, text=True)
 
-    spinner = console.status("[bold cyan]Waiting for merge confirmation...", spinner="dots")
-    with spinner:
-        merged = False
-        for _ in range(5):
-            sleep(5)
-            check = subprocess.run(
-                ["gh", "pr", "view", "--json", "merged,isInMergeQueue", "--jq", ".merged or .isInMergeQueue"],
-                cwd=path,
-                capture_output=True,
-                text=True
-            )
-            if check.stdout.strip() == "true":
-                merged = True
-                break
+    if merge_result.returncode != 0:
+        print(f"❌ Failed to merge PR for {repo_name}. Reason:\n{merge_result.stderr.strip()}")
+        return
 
-    if merged:
-        print(f"✅ PR merged successfully for [bold green]{repo_name}[/]\n")
-    else:
-        print(f"❌ Merge failed or not completed for [bold red]{repo_name}[/]\n")
+    print(f"✅ PR merged successfully for [bold green]{repo_name}[/]\n")
 
 def main():
     print(f"\n🔄 Scanning for repos with pending staging → master merges\n")

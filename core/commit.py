@@ -53,7 +53,7 @@ def detect_commit_type_from_diff(diff_content):
             type_counter["docs"] += 1
         if ".css" in line or ".scss" in line or ".html" in line:
             type_counter["ui"] += 1
-        if ".json" in line or ".yml" in line or ".yaml" in line or "config" in line or "build" in line:
+        if ".json" in line or ".yml" in line or "config" in line or "build" in line:
             type_counter["chore"] += 1
 
     if not type_counter:
@@ -115,14 +115,16 @@ def auto_commit_all_repos(root_dirs):
                 print("⏹️ Skipped commit.")
                 continue
 
-            subprocess.run(["git", "add", "."], cwd=repo_path)
-            subprocess.run(["git", "commit", "-m", commit_title], cwd=repo_path)
-            results["committed"] += 1
+            with console.status("[bold green]Committing changes...[/]", spinner="dots"):
+                subprocess.run(["git", "add", "."], cwd=repo_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(["git", "commit", "-m", commit_title], cwd=repo_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                results["committed"] += 1
             print(f"✅ Commit done.\n")
 
             push_input = input("📤 Do you want to push to staging? (y/n): ").strip().lower()
             if push_input == "y":
-                subprocess.run(["git", "push", "origin", DEFAULT_BRANCH], cwd=repo_path)
+                with console.status("[bold cyan]Pushing to staging...[/]", spinner="dots"):
+                    subprocess.run(["git", "push", "origin", DEFAULT_BRANCH], cwd=repo_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 results["pushed"] += 1
                 print("🚀 Pushed to staging branch\n")
             else:
