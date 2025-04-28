@@ -104,9 +104,9 @@ _Auto-generated on {date_str}_
             print(f"❌ Pull Request URL not found")
             return
 
-    # Dans tous les cas (nouvelle PR ou existante), on merge !
+    # Merge la PR (nouvelle ou existante)
     with console.status("[bold cyan]Merging pull request...", spinner="dots"):
-        merge_result = subprocess.run(["gh", "pr", "merge", "--merge", "--auto", "--repo", repo_name], cwd=path, capture_output=True, text=True)
+        merge_result = subprocess.run(["gh", "pr", "merge", "--merge", "--auto"], cwd=path, capture_output=True, text=True)
 
     if merge_result.returncode != 0:
         print(f"❌ Failed to merge PR for {repo_name}. Reason:\n{merge_result.stderr.strip()}")
