@@ -4,6 +4,10 @@ from datetime import datetime
 from collections import defaultdict
 from rich import print
 from rich.panel import Panel
+from rich.console import Console
+from rich.spinner import Spinner
+
+console = Console()
 
 ROOT_DIRS = [
     os.path.expanduser("~/code/pers"),
@@ -105,6 +109,18 @@ def update_changelog(repo_path, changelog_content):
         with open(changelog_path, "w", encoding="utf-8") as f:
             f.write(changelog_content)
 
+def commit_and_push_changelog(repo_path):
+    spinner = Spinner("dots", text="Committing and pushing changelog...")
+    console.print(spinner, end="")
+
+    try:
+        subprocess.run(["git", "add", CHANGELOG_FILENAME], cwd=repo_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["git", "commit", "-m", f"docs: update changelog ({datetime.now().strftime('%Y-%m-%d %H:%M')})"], cwd=repo_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["git", "push"], cwd=repo_path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        spinner.update(text="[green]✅ Changelog committed and pushed.[/green]")
+    except Exception as e:
+        spinner.update(text=f"[red]❌ Error during commit/push: {e}[/red]")
+
 def update_all_repos_interactive(root_dirs):
     print(f"\n🔄 Scanning repos for changelog updates\n")
 
@@ -124,20 +140,23 @@ def update_all_repos_interactive(root_dirs):
             version_label = last_tag if last_tag else "Unreleased"
             changelog_preview = generate_changelog(commits, version_label)
 
-            # ---- Nouveau Design ----
             repo_panel = Panel.fit(
                 changelog_preview,
                 title=f"[bold green]{repo}[/]",
                 subtitle=f"[bold blue]Last Tag: {last_tag if last_tag else 'None'}[/]",
                 border_style="cyan"
             )
-            print(repo_panel)
-            # ---- Fin Nouveau Design ----
+            console.print(repo_panel)
 
             user_input = input("✍️ Write changelog? (y/n): ").strip().lower()
             if user_input == "y":
                 update_changelog(repo_path, changelog_preview)
                 print(f"✅ Changelog updated for {repo}")
+
+                # Nouveau prompt pour commit/push
+                commit_input = input("📤 Do you want to commit and push the changelog? (y/n): ").strip().lower()
+                if commit_input == "y":
+                    commit_and_push_changelog(repo_path)
             else:
                 print("⏹️ Skipped changelog.")
 
