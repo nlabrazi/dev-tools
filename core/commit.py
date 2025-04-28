@@ -1,5 +1,4 @@
 import os
-import re
 import subprocess
 from datetime import datetime
 from collections import Counter
@@ -13,24 +12,20 @@ ROOT_DIRS = [
 ]
 DEFAULT_BRANCH = "staging"
 
-# Types prioritaires dans l'ordre
 TYPE_PRIORITY = ["fix", "feat", "refactor", "docs", "ui", "chore"]
 
 def is_git_repo(path):
     return os.path.isdir(os.path.join(path, ".git"))
 
 def is_comment_line(line):
-    """Return True if the line looks like a comment."""
     stripped = line.lstrip()
     return stripped.startswith("#") or stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*")
 
 def get_diff_content(path):
-    """Get the git diff --cached content."""
     result = subprocess.run(["git", "diff", "--cached"], cwd=path, capture_output=True, text=True)
     return result.stdout.strip()
 
 def detect_commit_type_from_diff(diff_content):
-    """Detect the commit type based on diff analysis (improved)."""
     if not diff_content:
         return "chore"
 
@@ -39,21 +34,19 @@ def detect_commit_type_from_diff(diff_content):
 
     for line in diff_lines:
         if not (line.startswith('+') or line.startswith('-')):
-            continue  # Only analyze additions/deletions
+            continue
 
         if is_comment_line(line):
-            # If line is a comment, weight it less
             if "fix" in line or "bug" in line or "error" in line or "typo" in line:
                 type_counter["fix"] += 0.5
             if "refactor" in line:
                 type_counter["refactor"] += 0.5
             continue
 
-        # Real code changes (heavier weight)
         if "fix" in line or "bug" in line or "error" in line or "typo" in line:
             type_counter["fix"] += 1
         if "function" in line or "def " in line or "class " in line:
-            type_counter["feat"] += 2  # heavily weight new features
+            type_counter["feat"] += 2
         if "refactor" in line or ("remove" in line and len(line) > 30):
             type_counter["refactor"] += 1
         if ".md" in line or "documentation" in line:
@@ -66,14 +59,18 @@ def detect_commit_type_from_diff(diff_content):
     if not type_counter:
         return "chore"
 
-    # Si plusieurs types détectés : choisir celui qui a le plus haut score
     selected_type, _ = type_counter.most_common(1)[0]
     return selected_type
 
-def generate_commit_title(commit_type):
-    """Generate the commit title based on detected type."""
-    date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    return f"{commit_type}: auto commit based on diff analysis ({date_str})"
+def get_modified_files_names(path):
+    result = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=path, capture_output=True, text=True)
+    files = result.stdout.strip().splitlines()
+    keywords = []
+    for f in files:
+        basename = os.path.basename(f).lower()
+        name_without_ext = os.path.splitext(basename)[0]
+        keywords.append(name_without_ext)
+    return keywords
 
 def auto_commit_all_repos(root_dirs):
     print(f"\n🔄 Scanning repos in: {', '.join(root_dirs)}\n")
@@ -98,8 +95,16 @@ def auto_commit_all_repos(root_dirs):
                 continue
 
             console.print(f"\n📦 Committing for [bold green]{repo}...[/]")
+
             commit_type = detect_commit_type_from_diff(diff_content)
-            commit_title = generate_commit_title(commit_type)
+            date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+            keywords = get_modified_files_names(repo_path)
+
+            if keywords:
+                title_keywords = " and ".join(keywords[:2])
+                commit_title = f"{commit_type}: update {title_keywords} ({date_str})"
+            else:
+                commit_title = f"{commit_type}: auto commit based on diff analysis ({date_str})"
 
             print("\n--- Preview of commit message ---\n")
             print(commit_title)
