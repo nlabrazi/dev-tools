@@ -36,6 +36,15 @@ def repo_has_diff_between_staging_and_master(path):
 def get_commit_summary(path):
     return run_git_command(path, ["log", f"origin/{DEFAULT_BASE_BRANCH}..origin/{DEFAULT_HEAD_BRANCH}", "--pretty=format:- %s"])
 
+def existing_pr_number(path):
+    result = subprocess.run(
+        ["gh", "pr", "list", "--base", DEFAULT_BASE_BRANCH, "--head", DEFAULT_HEAD_BRANCH, "--json", "number", "--jq", ".[0].number"],
+        cwd=path,
+        capture_output=True,
+        text=True
+    )
+    return result.stdout.strip()
+
 def create_and_merge_pr(path, repo_name):
     date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     title = f"🔀 chore: merge staging into master ({date_str})"
@@ -45,7 +54,11 @@ def create_and_merge_pr(path, repo_name):
         print("⚠️  No new commits found to merge.")
         return
 
-    body = f"""## 📦 Merge Summary
+    pr_number = existing_pr_number(path)
+    if pr_number:
+        print(f"🔗 Existing Pull Request detected: #{pr_number}")
+    else:
+        body = f"""## 📦 Merge Summary
 
 This pull request merges the latest validated commits from `staging` into `master`.
 
@@ -59,36 +72,41 @@ This pull request merges the latest validated commits from `staging` into `maste
 
 _Auto-generated on {date_str}_
 """
-    print(f"\n📘 Repository: [bold orange]{repo_name}[/]")
-    print(f"--- Pull Request Preview ---\nTitle: {title}\n\n{body}\n---\n")
+        print(f"\n📘 Repository: [bold orange]{repo_name}[/]")
+        print(f"--- Pull Request Preview ---\nTitle: {title}\n\n{body}\n---\n")
 
-    confirm = input("🚀 Do you want to create and auto-merge this PR? (y/n): ").strip().lower()
-    if confirm != "y":
-        print("❌ Skipped.")
-        return
+        confirm = input("🚀 Do you want to create and auto-merge this PR? (y/n): ").strip().lower()
+        if confirm != "y":
+            print("❌ Skipped.")
+            return
 
-    with console.status("[bold green]Creating pull request...", spinner="dots"):
-        result = subprocess.run(
-            ["gh", "pr", "create", "--base", DEFAULT_BASE_BRANCH, "--head", DEFAULT_HEAD_BRANCH, "--title", title, "--body", body],
-            cwd=path,
-            capture_output=True,
-            text=True
-        )
+        with console.status("[bold green]Creating pull request...", spinner="dots"):
+            result = subprocess.run(
+                ["gh", "pr", "create", "--base", DEFAULT_BASE_BRANCH, "--head", DEFAULT_HEAD_BRANCH, "--title", title, "--body", body],
+                cwd=path,
+                capture_output=True,
+                text=True
+            )
 
-    pr_url = None
-    for line in result.stdout.strip().splitlines():
-        if line.startswith("https://github.com/"):
-            pr_url = line
-            break
+        if result.returncode != 0:
+            print(f"❌ Failed to create Pull Request for {repo_name}. Reason:\n{result.stderr.strip()}")
+            return
 
-    if pr_url:
-        print(f"🔗 Pull Request created: {pr_url}")
-    else:
-        print(f"❌ Failed to create Pull Request for {repo_name}")
-        return
+        pr_url = None
+        for line in result.stdout.strip().splitlines():
+            if line.startswith("https://github.com/"):
+                pr_url = line
+                break
 
+        if pr_url:
+            print(f"🔗 Pull Request created: {pr_url}")
+        else:
+            print(f"❌ Pull Request URL not found")
+            return
+
+    # Dans tous les cas (nouvelle PR ou existante), on merge !
     with console.status("[bold cyan]Merging pull request...", spinner="dots"):
-        merge_result = subprocess.run(["gh", "pr", "merge", "--merge", "--auto"], cwd=path, capture_output=True, text=True)
+        merge_result = subprocess.run(["gh", "pr", "merge", "--merge", "--auto", "--repo", repo_name], cwd=path, capture_output=True, text=True)
 
     if merge_result.returncode != 0:
         print(f"❌ Failed to merge PR for {repo_name}. Reason:\n{merge_result.stderr.strip()}")
