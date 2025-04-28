@@ -1,3 +1,35 @@
+## [Unreleased] - 2025-04-28
+
+### 🐛 Fix
+- typo into commit regarding color
+
+### 🔧 Chore
+- refactor into core modules and improve CLI UX
+
+## [Unreleased] - 2025-04-28
+
+### 🐛 Fix
+- typo into commit regarding color
+
+### 🔧 Chore
+- refactor into core modules and improve CLI UX
+
+## [Unreleased] - 2025-04-28
+
+### 🐛 Fix
+- typo into commit regarding color
+
+### 🔧 Chore
+- refactor into core modules and improve CLI UX
+
+## [Unreleased] - 2025-04-28
+
+### 🐛 Fix
+- typo into commit regarding color
+
+### 🔧 Chore
+- refactor into core modules and improve CLI UX
+
 # 📅 CHANGELOG
 
 ## [Unreleased] - 2025-04-19
