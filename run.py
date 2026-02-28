@@ -22,13 +22,18 @@ def section_title(title, emoji):
 
 def main():
     parser = argparse.ArgumentParser(description="Dev Tools Runner")
-    parser.add_argument("--dry-run", action="store_true", help="Enable dry-run mode (simulate actions)")
+
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--dry-run", action="store_true", help="Simulate actions (safe mode)")
+    group.add_argument("--prod", action="store_true", help="Execute real actions")
+
     args = parser.parse_args()
 
     if args.dry_run:
         set_dry_run(True)
         console.print("\n🚀 [bold cyan][DRY-RUN MODE ENABLED][/]\n")
-    else:
+    elif args.prod:
+        set_dry_run(False)
         console.print("\n🚀 [bold green][PRODUCTION MODE - REAL EXECUTION][/]\n")
 
     # Banner

@@ -1,64 +1,202 @@
 import os
-import subprocess
+import json
+import urllib.request
+import urllib.error
 from datetime import datetime
-from time import sleep
 from rich import print
 from rich.console import Console
 
+from utils.common import run_command
+
 ROOT_DIRS = [
     os.path.expanduser("~/code/pers"),
-    os.path.expanduser("~/code/bricolage")
+    os.path.expanduser("~/code/bricolage"),
 ]
 
 DEFAULT_BASE_BRANCH = "master"
 DEFAULT_HEAD_BRANCH = "staging"
 
+# --- Ollama config (optional) ---
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
+OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "60"))
+ENABLE_OLLAMA = os.getenv("ENABLE_OLLAMA", "1") == "1"
+
 console = Console()
 
-def is_git_repo(path):
+
+def is_git_repo(path: str) -> bool:
     return os.path.isdir(os.path.join(path, ".git"))
 
-def run_git_command(path, args):
-    result = subprocess.run(
-        ["git"] + args,
-        cwd=path,
-        capture_output=True,
-        text=True
-    )
-    return result.stdout.strip()
 
-def repo_has_diff_between_staging_and_master(path):
-    subprocess.run(["git", "fetch"], cwd=path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    base_commit = run_git_command(path, ["merge-base", f"origin/{DEFAULT_BASE_BRANCH}", f"origin/{DEFAULT_HEAD_BRANCH}"])
+def run_git_command(path: str, args: list[str]) -> str:
+    """
+    Run git command in repo path and return stdout stripped.
+    """
+    result = run_command(["git"] + args, cwd=path)
+    return (result.stdout or "").strip()
+
+
+def repo_has_diff_between_staging_and_master(path: str) -> bool:
+    # Fetch remote refs
+    run_command(["git", "fetch"], cwd=path, silent=True)
+
+    base_commit = run_git_command(
+        path, ["merge-base", f"origin/{DEFAULT_BASE_BRANCH}", f"origin/{DEFAULT_HEAD_BRANCH}"]
+    )
     head_commit = run_git_command(path, ["rev-parse", f"origin/{DEFAULT_HEAD_BRANCH}"])
-    return base_commit != head_commit
 
-def get_commit_summary(path):
-    return run_git_command(path, ["log", f"origin/{DEFAULT_BASE_BRANCH}..origin/{DEFAULT_HEAD_BRANCH}", "--pretty=format:- %s"])
+    return bool(base_commit) and bool(head_commit) and base_commit != head_commit
 
-def existing_pr_number(path):
-    result = subprocess.run(
-        ["gh", "pr", "list", "--base", DEFAULT_BASE_BRANCH, "--head", DEFAULT_HEAD_BRANCH, "--json", "number", "--jq", ".[0].number"],
-        cwd=path,
-        capture_output=True,
-        text=True
+
+def get_commit_summary(path: str) -> str:
+    return run_git_command(
+        path,
+        ["log", f"origin/{DEFAULT_BASE_BRANCH}..origin/{DEFAULT_HEAD_BRANCH}", "--pretty=format:- %s"],
     )
-    return result.stdout.strip()
 
-def create_and_merge_pr(path, repo_name):
+
+def existing_pr_number(path: str) -> str:
+    result = run_command(
+        [
+            "gh",
+            "pr",
+            "list",
+            "--base",
+            DEFAULT_BASE_BRANCH,
+            "--head",
+            DEFAULT_HEAD_BRANCH,
+            "--json",
+            "number",
+            "--jq",
+            ".[0].number",
+        ],
+        cwd=path,
+    )
+    return (result.stdout or "").strip()
+
+
+# ---------------- Ollama helpers ----------------
+
+class OllamaError(RuntimeError):
+    pass
+
+
+def safe_parse_json(raw: str) -> dict | None:
+    raw = (raw or "").strip()
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def ollama_chat_json(messages: list[dict], model: str | None = None, temperature: float = 0.2) -> str:
+    """
+    Calls Ollama /api/chat and returns assistant content (string).
+    """
+    payload = {
+        "model": model or OLLAMA_MODEL,
+        "messages": messages,
+        "stream": False,
+        "options": {"temperature": temperature},
+    }
+
+    url = f"{OLLAMA_HOST}/api/chat"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.URLError as e:
+        raise OllamaError(f"Ollama unreachable: {e}") from e
+    except Exception as e:
+        raise OllamaError(f"Ollama error: {e}") from e
+
+    content = (data.get("message") or {}).get("content")
+    if not content:
+        raise OllamaError(f"Unexpected Ollama response shape: {data}")
+    return content
+
+
+def generate_pr_text_with_ollama(repo_name: str, commit_summary: str) -> tuple[str | None, str | None]:
+    """
+    Returns (title, body) if success, else (None, None).
+    """
+    if not ENABLE_OLLAMA:
+        return None, None
+
+    pr_system = """You are a senior engineer writing a Pull Request for merging staging into master.
+
+Rules:
+- Output MUST be valid JSON only. No markdown fences, no extra text.
+- JSON shape:
+{
+  "mr": {
+    "title": "...",
+    "description": "..."
+  }
+}
+- title: <= 80 chars
+- description: markdown with sections:
+  ## What
+  ## Why
+  ## Testing
+  ## Notes
+- Keep it concise and accurate from the commit summary.
+"""
+
+    # Guard size (Ollama can choke on huge text)
+    commit_summary_trimmed = commit_summary.strip()
+    if len(commit_summary_trimmed) > 12000:
+        commit_summary_trimmed = commit_summary_trimmed[:12000] + "\n- (truncated)"
+
+    pr_user = f"""Repository: {repo_name}
+Base: {DEFAULT_BASE_BRANCH}
+Head: {DEFAULT_HEAD_BRANCH}
+
+Commits included:
+{commit_summary_trimmed}
+"""
+
+    raw = ollama_chat_json(
+        [
+            {"role": "system", "content": pr_system},
+            {"role": "user", "content": pr_user},
+        ],
+        temperature=0.2,
+    )
+
+    data = safe_parse_json(raw)
+    if not data:
+        return None, None
+
+    mr = data.get("mr") or {}
+    title = (mr.get("title") or "").strip()
+    body = (mr.get("description") or "").strip()
+    if not title or not body:
+        return None, None
+
+    return title, body
+
+
+# ---------------- Main PR flow ----------------
+
+def create_and_merge_pr(path: str, repo_name: str) -> None:
     date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    title = f"🔀 chore: merge staging into master ({date_str})"
     commit_summary = get_commit_summary(path)
 
     if not commit_summary:
         print("⚠️  No new commits found to merge.")
         return
 
-    pr_number = existing_pr_number(path)
-    if pr_number:
-        print(f"🔗 Existing Pull Request detected: #{pr_number}")
-    else:
-        body = f"""## 📦 Merge Summary
+    # Fallback PR text
+    fallback_title = f"🔀 chore: merge staging into master ({date_str})"
+    fallback_body = f"""## 📦 Merge Summary
 
 This pull request merges the latest validated commits from `staging` into `master`.
 
@@ -72,6 +210,21 @@ This pull request merges the latest validated commits from `staging` into `maste
 
 _Auto-generated on {date_str}_
 """
+
+    # Try Ollama
+    title, body = None, None
+    try:
+        title, body = generate_pr_text_with_ollama(repo_name, commit_summary)
+    except OllamaError as e:
+        print(f"⚠️  Ollama unavailable for PR text, fallback used. Reason: {e}")
+
+    title = title or fallback_title
+    body = body or fallback_body
+
+    pr_number = existing_pr_number(path)
+    if pr_number:
+        print(f"🔗 Existing Pull Request detected: #{pr_number}")
+    else:
         print(f"\n📘 Repository: [bold orange]{repo_name}[/]")
         print(f"--- Pull Request Preview ---\nTitle: {title}\n\n{body}\n---\n")
 
@@ -81,19 +234,22 @@ _Auto-generated on {date_str}_
             return
 
         with console.status("[bold green]Creating pull request...", spinner="dots"):
-            result = subprocess.run(
-                ["gh", "pr", "create", "--base", DEFAULT_BASE_BRANCH, "--head", DEFAULT_HEAD_BRANCH, "--title", title, "--body", body],
+            result = run_command(
+                ["gh", "pr", "create",
+                 "--base", DEFAULT_BASE_BRANCH,
+                 "--head", DEFAULT_HEAD_BRANCH,
+                 "--title", title,
+                 "--body", body],
                 cwd=path,
-                capture_output=True,
-                text=True
             )
 
         if result.returncode != 0:
-            print(f"❌ Failed to create Pull Request for {repo_name}. Reason:\n{result.stderr.strip()}")
+            stderr = (result.stderr or "").strip()
+            print(f"❌ Failed to create Pull Request for {repo_name}. Reason:\n{stderr}")
             return
 
         pr_url = None
-        for line in result.stdout.strip().splitlines():
+        for line in (result.stdout or "").strip().splitlines():
             if line.startswith("https://github.com/"):
                 pr_url = line
                 break
@@ -101,24 +257,34 @@ _Auto-generated on {date_str}_
         if pr_url:
             print(f"🔗 Pull Request created: {pr_url}")
         else:
-            print(f"❌ Pull Request URL not found")
+            print("❌ Pull Request URL not found")
             return
 
-    # Merge la PR (nouvelle ou existante)
+    # Merge the PR (new or existing)
     with console.status("[bold cyan]Merging pull request...", spinner="dots"):
-        merge_result = subprocess.run(["gh", "pr", "merge", "--merge", "--auto"], cwd=path, capture_output=True, text=True)
+        merge_result = run_command(
+            ["gh", "pr", "merge", "--merge", "--auto"],
+            cwd=path,
+        )
 
     if merge_result.returncode != 0:
-        print(f"❌ Failed to merge PR for {repo_name}. Reason:\n{merge_result.stderr.strip()}")
+        stderr = (merge_result.stderr or "").strip()
+        print(f"❌ Failed to merge PR for {repo_name}. Reason:\n{stderr}")
         return
 
     print(f"✅ PR merged successfully for [bold green]{repo_name}[/]\n")
 
-def main():
-    print(f"\n🔄 Scanning for repos with pending staging → master merges\n")
+
+def main() -> None:
+    print("\n🔄 Scanning for repos with pending staging → master merges\n")
 
     for root_dir in ROOT_DIRS:
         console.print(f"\n📂 [bold yellow]Scanning root directory:[/] {root_dir}\n")
+
+        if not os.path.isdir(root_dir):
+            print(f"⚠️  Root directory not found: {root_dir}")
+            continue
+
         for repo in os.listdir(root_dir):
             path = os.path.join(root_dir, repo)
             if not is_git_repo(path):
@@ -129,6 +295,7 @@ def main():
                 create_and_merge_pr(path, repo)
             else:
                 print(f"✔️  [bold dark_orange]{repo}[/]: staging is up to date with master.")
+
 
 if __name__ == "__main__":
     main()
