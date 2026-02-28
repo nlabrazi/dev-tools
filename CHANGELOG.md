@@ -1,3 +1,14 @@
+## [Unreleased] - 2026-03-01
+
+### ✨ Feat
+- update core/commit.py and core/formatters.py (2026-03-01 00:15)
+
+### 🐛 Fix
+- typo into commit regarding color
+
+### 🔧 Chore
+- refactor into core modules and improve CLI UX
+
 ## [Unreleased] - 2025-04-28
 
 ### 🐛 Fix
