@@ -116,26 +116,55 @@ def generate_commit_message_with_ollama(repo: str, files: list[str], diff_conten
     """
     Returns full commit message (header + body) or None if Ollama fails / bad JSON.
     """
+    def parse_and_build(raw: str) -> str | None:
+        data = safe_parse_json(raw)
+        if not data:
+            return None
+        try:
+            return build_conventional_commit(data)
+        except Exception:
+            return None
+
     try:
         user_prompt = COMMIT_USER_TEMPLATE.format(
             repo=repo,
             files="\n".join(f"- {f}" for f in files) or "- (unknown)",
             diff=diff_content[:12000],  # garde-fou
         )
+        messages = [
+            {"role": "system", "content": COMMIT_SYSTEM},
+            {"role": "user", "content": user_prompt},
+        ]
+
         with console.status("[bold cyan]🤖 Generating commit message...[/]", spinner="dots"):
             raw = chat_json(
-                [
-                    {"role": "system", "content": COMMIT_SYSTEM},
-                    {"role": "user", "content": user_prompt},
-                ],
+                messages,
                 temperature=0.2,
+                json_mode=True,
             )
-            if os.getenv("OLLAMA_DEBUG", "0") == "1":
-                print("\n[DEBUG] Raw Ollama output:\n", raw, "\n")
-        data = safe_parse_json(raw)
-        if not data:
-            return None
-        return build_conventional_commit(data)
+        if os.getenv("OLLAMA_DEBUG", "0") == "1":
+            print("\n[DEBUG] Raw Ollama output (attempt 1):\n", raw, "\n")
+
+        built = parse_and_build(raw)
+        if built:
+            return built
+
+        print("⚠️ Ollama output is not valid commit JSON, retrying once.")
+        with console.status("[bold cyan]🤖 Retrying commit message generation...[/]", spinner="dots"):
+            raw_retry = chat_json(
+                messages,
+                temperature=0.0,
+                json_mode=True,
+            )
+        if os.getenv("OLLAMA_DEBUG", "0") == "1":
+            print("\n[DEBUG] Raw Ollama output (attempt 2):\n", raw_retry, "\n")
+
+        built_retry = parse_and_build(raw_retry)
+        if built_retry:
+            return built_retry
+
+        print("⚠️ Ollama returned invalid JSON twice, fallback used.")
+        return None
     except OllamaError as e:
         print(f"⚠️ Ollama unavailable, fallback used. Reason: {e}")
         return None

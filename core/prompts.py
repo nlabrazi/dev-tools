@@ -36,12 +36,27 @@ Staged diff:
 PR_SYSTEM = """You are a senior engineer writing a Pull Request for merging staging into master.
 
 Rules:
-- Output MUST be valid JSON only. No markdown, no extra text.
-- title: <= 80 chars.
-- description: markdown with sections: What / Why / Testing / Notes.
+- Output MUST be valid JSON only. No markdown fences, no extra text.
+- JSON shape MUST be exactly:
+{
+  "mr": {
+    "title": "string <= 80 chars",
+    "description": "markdown"
+  }
+}
+- description MUST include exactly these sections:
+  ## What
+  ## Why
+  ## Testing
+  ## Notes
+- Keep content concise and based only on the provided commit summary.
+- Do not invent tests. If no explicit test evidence is present, say so in Testing.
 """
 
 PR_USER_TEMPLATE = """Repository: {repo}
+Base: {base}
+Head: {head}
+
 Commits included:
 {commit_summary}
 """

@@ -1,7 +1,4 @@
 import os
-import json
-import urllib.request
-import urllib.error
 import time
 from datetime import datetime
 
@@ -9,6 +6,9 @@ from rich import print
 from rich.console import Console
 
 from utils.common import run_command
+from core.ollama import chat_json, OllamaError
+from core.prompts import PR_SYSTEM, PR_USER_TEMPLATE
+from core.formatters import safe_parse_json, build_pr
 from core.versioning import (
     compute_next_version,
     determine_bump_from_commits,
@@ -23,12 +23,6 @@ ROOT_DIRS = [
 
 DEFAULT_BASE_BRANCH = "master"
 DEFAULT_HEAD_BRANCH = "staging"
-
-# --- Ollama config (optional) ---
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
-OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "60"))
-ENABLE_OLLAMA = os.getenv("ENABLE_OLLAMA", "1") == "1"
 
 console = Console()
 
@@ -207,111 +201,58 @@ def tag_release_interactive(repo_path: str, repo_name: str, commit_summary: str)
     print(f"✅ Tag created and pushed: {tag}")
 
 
-# ---------------- Ollama helpers ----------------
-
-class OllamaError(RuntimeError):
-    pass
-
-
-def safe_parse_json(raw: str) -> dict | None:
-    raw = (raw or "").strip()
-    try:
-        return json.loads(raw)
-    except Exception:
-        return None
-
-
-def ollama_chat_json(messages: list[dict], model: str | None = None, temperature: float = 0.2) -> str:
-    """
-    Calls Ollama /api/chat and returns assistant content (string).
-    """
-    payload = {
-        "model": model or OLLAMA_MODEL,
-        "messages": messages,
-        "stream": False,
-        "options": {"temperature": temperature},
-    }
-
-    url = f"{OLLAMA_HOST}/api/chat"
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError as e:
-        raise OllamaError(f"Ollama unreachable: {e}") from e
-    except Exception as e:
-        raise OllamaError(f"Ollama error: {e}") from e
-
-    content = (data.get("message") or {}).get("content")
-    if not content:
-        raise OllamaError(f"Unexpected Ollama response shape: {data}")
-    return content
+def is_ollama_enabled() -> bool:
+    return os.getenv("ENABLE_OLLAMA", "1") == "1"
 
 
 def generate_pr_text_with_ollama(repo_name: str, commit_summary: str) -> tuple[str | None, str | None]:
     """
     Returns (title, body) if success, else (None, None).
     """
-    if not ENABLE_OLLAMA:
+    if not is_ollama_enabled():
         return None, None
-
-    pr_system = """You are a senior engineer writing a Pull Request for merging staging into master.
-
-Rules:
-- Output MUST be valid JSON only. No markdown fences, no extra text.
-- JSON shape:
-{
-  "mr": {
-    "title": "...",
-    "description": "..."
-  }
-}
-- title: <= 80 chars
-- description: markdown with sections:
-  ## What
-  ## Why
-  ## Testing
-  ## Notes
-- Keep it concise and accurate from the commit summary.
-"""
 
     commit_summary_trimmed = commit_summary.strip()
     if len(commit_summary_trimmed) > 12000:
         commit_summary_trimmed = commit_summary_trimmed[:12000] + "\n- (truncated)"
 
-    pr_user = f"""Repository: {repo_name}
-Base: {DEFAULT_BASE_BRANCH}
-Head: {DEFAULT_HEAD_BRANCH}
-
-Commits included:
-{commit_summary_trimmed}
-"""
-
-    raw = ollama_chat_json(
-        [
-            {"role": "system", "content": pr_system},
-            {"role": "user", "content": pr_user},
-        ],
-        temperature=0.2,
+    pr_user = PR_USER_TEMPLATE.format(
+        repo=repo_name,
+        base=DEFAULT_BASE_BRANCH,
+        head=DEFAULT_HEAD_BRANCH,
+        commit_summary=commit_summary_trimmed,
     )
+    messages = [
+        {"role": "system", "content": PR_SYSTEM},
+        {"role": "user", "content": pr_user},
+    ]
+
+    raw = chat_json(messages, temperature=0.2, json_mode=True)
+    if os.getenv("OLLAMA_DEBUG", "0") == "1":
+        print("\n[DEBUG] Raw Ollama PR output (attempt 1):\n", raw, "\n")
 
     data = safe_parse_json(raw)
-    if not data:
+    if data:
+        try:
+            return build_pr(data)
+        except Exception:
+            pass
+
+    print("⚠️ Ollama PR output invalid, retrying once.")
+    raw_retry = chat_json(messages, temperature=0.0, json_mode=True)
+    if os.getenv("OLLAMA_DEBUG", "0") == "1":
+        print("\n[DEBUG] Raw Ollama PR output (attempt 2):\n", raw_retry, "\n")
+
+    data_retry = safe_parse_json(raw_retry)
+    if not data_retry:
+        print("⚠️ Ollama PR JSON invalid twice, fallback used.")
         return None, None
 
-    mr = data.get("mr") or {}
-    title = (mr.get("title") or "").strip()
-    body = (mr.get("description") or "").strip()
-    if not title or not body:
+    try:
+        return build_pr(data_retry)
+    except Exception as e:
+        print(f"⚠️ Ollama PR shape invalid, fallback used. Reason: {e}")
         return None, None
-
-    return title, body
 
 
 # ---------------- Main PR flow ----------------
