@@ -31,8 +31,10 @@ _BLOCK_PREFIXES: list[list[str]] = [
     ["git", "switch"],
     ["git", "restore"],
     ["git", "tag"],
-    ["gh"],  # GitHub CLI actions should not run in dry-run
+    ["gh"], # GitHub CLI actions should not run in dry-run
 ]
+
+_DRY_RUN_BLOCKED_RC = 99
 
 
 def set_dry_run(state: bool = True) -> None:
@@ -63,9 +65,8 @@ def run_command(
     """
     Execute a command and return a CompletedProcess with stdout/stderr always available.
 
-    DRY_RUN behavior:
-    - Read-only commands (git status/diff/log/...) are executed for real so detection works.
-    - Mutating commands (git add/commit/push, gh ...) are blocked and only printed.
+    silent=True means: don't print anything unless you choose to in caller.
+    It does NOT mean "discard outputs".
     """
     # Normalize to list[str]
     if isinstance(command, str):
@@ -73,14 +74,14 @@ def run_command(
     else:
         command_list = command
 
+    cmd_str = " ".join(command_list)
+
     # DRY-RUN handling
     if DRY_RUN:
-        cmd_str = " ".join(command_list)
-
-        # If command is read-only, execute it for real (so status/diff detection works)
+        # Allow read-only commands to execute for real
         if _is_safe_readonly(command_list) and not _is_blocked(command_list):
             if not silent:
-                print(f"🧪 [DRY-RUN/READ] Executing (read-only): {cmd_str} in {cwd}")
+                print(f"🧪 [DRY-RUN/READ] Executing: {cmd_str} in {cwd}")
             return subprocess.run(
                 command_list,
                 cwd=cwd,
@@ -88,34 +89,23 @@ def run_command(
                 text=text,
             )
 
-        # Otherwise, block execution
-        print(f"🌐 [DRY-RUN] Would execute: {cmd_str} in {cwd}")
+        # Block mutating commands: DO NOT pretend success
+        if not silent:
+            print(f"🌐 [DRY-RUN] Blocked (would execute): {cmd_str} in {cwd}")
         return subprocess.CompletedProcess(
             args=command_list,
-            returncode=0,
+            returncode=_DRY_RUN_BLOCKED_RC,
             stdout="",
-            stderr="",
+            stderr="DRY_RUN: blocked mutating command",
         )
 
-    # Normal execution
-    if silent:
-        result = subprocess.run(
-            command_list,
-            cwd=cwd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            text=text,
-        )
-        # Ensure attrs exist
-        if not hasattr(result, "stdout") or result.stdout is None:
-            result.stdout = ""
-        if not hasattr(result, "stderr") or result.stderr is None:
-            result.stderr = ""
-        return result
-
-    return subprocess.run(
+    # Normal execution: ALWAYS capture output so callers can debug on failure
+    result = subprocess.run(
         command_list,
         cwd=cwd,
         capture_output=True,
         text=text,
     )
+
+    # If silent, we simply do not print. Caller can decide.
+    return result
