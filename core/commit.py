@@ -130,6 +130,8 @@ def generate_commit_message_with_ollama(repo: str, files: list[str], diff_conten
                 ],
                 temperature=0.2,
             )
+            if os.getenv("OLLAMA_DEBUG", "0") == "1":
+                print("\n[DEBUG] Raw Ollama output:\n", raw, "\n")
         data = safe_parse_json(raw)
         if not data:
             return None

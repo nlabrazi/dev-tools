@@ -15,10 +15,22 @@ def safe_parse_json(raw: str) -> Optional[Dict[str, Any]]:
         return None
     raw = raw.strip()
 
+    def normalize(parsed: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        If model returned commit fields at top-level instead of {"commit": {...}},
+        wrap them automatically.
+        """
+        if isinstance(parsed, dict) and "commit" not in parsed:
+            if any(k in parsed for k in ("type", "scope", "subject", "body", "breaking")):
+                return {"commit": parsed}
+        return parsed
+
     # Fast path
     try:
         parsed = json.loads(raw)
-        return parsed if isinstance(parsed, dict) else None
+        if isinstance(parsed, dict):
+            return normalize(parsed)
+        return None
     except Exception:
         pass
 
@@ -32,7 +44,9 @@ def safe_parse_json(raw: str) -> Optional[Dict[str, Any]]:
     candidate = raw[start : end + 1]
     try:
         parsed = json.loads(candidate)
-        return parsed if isinstance(parsed, dict) else None
+        if isinstance(parsed, dict):
+            return normalize(parsed)
+        return None
     except Exception:
         return None
 

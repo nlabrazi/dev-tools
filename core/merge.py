@@ -8,6 +8,13 @@ from rich.console import Console
 
 from utils.common import run_command
 
+from core.versioning import (
+    compute_next_version,
+    determine_bump_from_commits,
+    create_and_push_tag,
+    get_last_semver_tag,
+)
+
 ROOT_DIRS = [
     os.path.expanduser("~/code/pers"),
     os.path.expanduser("~/code/bricolage"),
@@ -74,6 +81,39 @@ def existing_pr_number(path: str) -> str:
         cwd=path,
     )
     return (result.stdout or "").strip()
+
+
+def checkout_update_master(repo_path: str) -> None:
+    run_command(["git", "fetch", "--all", "--prune"], cwd=repo_path, silent=True)
+    run_command(["git", "fetch", "--tags"], cwd=repo_path, silent=True)
+    run_command(["git", "checkout", DEFAULT_BASE_BRANCH], cwd=repo_path)
+    run_command(["git", "pull", "--ff-only"], cwd=repo_path)
+
+
+def tag_release_interactive(repo_path: str, repo_name: str, commit_summary: str) -> None:
+    """
+    After merge, propose a semver tag.
+    """
+    last_tag = get_last_semver_tag(repo_path)
+    auto_bump = determine_bump_from_commits(commit_summary)
+    suggested = compute_next_version(repo_path, auto_bump, default_first="v0.1.0")
+
+    print(f"\n🏷️  Versioning for [bold green]{repo_name}[/]")
+    print(f"Last tag: {last_tag or '(none)'}")
+    print(f"Auto bump suggestion: [bold cyan]{auto_bump}[/]")
+    print(f"Suggested next tag: [bold yellow]{suggested}[/]")
+
+    choice = input("Choose bump (major/minor/patch) or press Enter to accept suggestion: ").strip().lower()
+    bump = choice if choice in ("major", "minor", "patch") else auto_bump
+    tag = compute_next_version(repo_path, bump, default_first="v0.1.0")
+
+    confirm = input(f"Create and push tag {tag}? (y/n): ").strip().lower()
+    if confirm != "y":
+        print("⏭️  Skipped tagging.")
+        return
+
+    create_and_push_tag(repo_path, tag, message=f"Release {tag}")
+    print(f"✅ Tag created and pushed: {tag}")
 
 
 # ---------------- Ollama helpers ----------------
@@ -230,7 +270,7 @@ _Auto-generated on {date_str}_
 
         confirm = input("🚀 Do you want to create and auto-merge this PR? (y/n): ").strip().lower()
         if confirm != "y":
-            print("❌ Skipped.")
+            print("❌ Skipped.\n")
             return
 
         with console.status("[bold green]Creating pull request...", spinner="dots"):
@@ -273,6 +313,13 @@ _Auto-generated on {date_str}_
         return
 
     print(f"✅ PR merged successfully for [bold green]{repo_name}[/]\n")
+
+    # Refresh local master and tag the release
+    try:
+        checkout_update_master(path)
+        tag_release_interactive(path, repo_name, commit_summary)
+    except Exception as e:
+        print(f"⚠️  Tagging step failed/skipped for {repo_name}: {e}")
 
 
 def main() -> None:
