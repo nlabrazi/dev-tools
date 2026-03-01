@@ -205,6 +205,87 @@ def is_ollama_enabled() -> bool:
     return os.getenv("ENABLE_OLLAMA", "1") == "1"
 
 
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= minimum else default
+
+
+def trim_text_middle(text: str, max_chars: int) -> str:
+    text = text or ""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+
+    marker = "\n\n... [truncated for model context] ...\n\n"
+    if max_chars <= len(marker) + 50:
+        return text[:max_chars]
+
+    head = int(max_chars * 0.7)
+    tail = max_chars - head - len(marker)
+    if tail < 0:
+        tail = 0
+    return text[:head] + marker + text[-tail:]
+
+
+def extract_plain_pr(raw: str) -> tuple[str | None, str | None]:
+    """
+    Best-effort extraction when model output is not valid JSON.
+    Expects lines with "TITLE:" and markdown sections.
+    """
+    if not raw:
+        return None, None
+
+    lines: list[str] = []
+    for line in raw.replace("\r\n", "\n").splitlines():
+        s = line.rstrip()
+        if s.strip().startswith("```"):
+            continue
+        lines.append(s)
+
+    # Find title
+    title = ""
+    title_idx = -1
+    for idx, line in enumerate(lines):
+        s = line.strip()
+        if not s:
+            continue
+        if s.lower().startswith("title:"):
+            title = s.split(":", 1)[1].strip()
+            title_idx = idx
+            break
+        if s.startswith("#") and not s.startswith("## "):
+            title = s.lstrip("#").strip()
+            title_idx = idx
+            break
+        title = s
+        title_idx = idx
+        break
+
+    if not title:
+        return None, None
+    title = title[:80].rstrip()
+    if not title:
+        return None, None
+
+    body = "\n".join(lines[title_idx + 1 :]).strip()
+    required_sections = ("## What", "## Why", "## Testing", "## Notes")
+    if not body or any(section not in body for section in required_sections):
+        base_body = body or "- Summary not provided."
+        body = (
+            f"## What\n{base_body}\n\n"
+            "## Why\n- N/A\n\n"
+            "## Testing\n- Not specified in commit summary.\n\n"
+            "## Notes\n- N/A"
+        )
+
+    return title, body
+
+
 def generate_pr_text_with_ollama(repo_name: str, commit_summary: str) -> tuple[str | None, str | None]:
     """
     Returns (title, body) if success, else (None, None).
@@ -212,9 +293,8 @@ def generate_pr_text_with_ollama(repo_name: str, commit_summary: str) -> tuple[s
     if not is_ollama_enabled():
         return None, None
 
-    commit_summary_trimmed = commit_summary.strip()
-    if len(commit_summary_trimmed) > 12000:
-        commit_summary_trimmed = commit_summary_trimmed[:12000] + "\n- (truncated)"
+    max_summary_chars = _env_int("OLLAMA_MAX_PR_SUMMARY_CHARS", 5000, minimum=1200)
+    commit_summary_trimmed = trim_text_middle(commit_summary.strip(), max_summary_chars)
 
     pr_user = PR_USER_TEMPLATE.format(
         repo=repo_name,
@@ -237,6 +317,10 @@ def generate_pr_text_with_ollama(repo_name: str, commit_summary: str) -> tuple[s
             return build_pr(data)
         except Exception:
             pass
+    plain_title, plain_body = extract_plain_pr(raw)
+    if plain_title and plain_body:
+        print("⚠️ Ollama PR JSON invalid, using plain-text PR from model output.")
+        return plain_title, plain_body
 
     print("⚠️ Ollama PR output invalid, retrying once.")
     raw_retry = chat_json(messages, temperature=0.0, json_mode=True)
@@ -244,15 +328,47 @@ def generate_pr_text_with_ollama(repo_name: str, commit_summary: str) -> tuple[s
         print("\n[DEBUG] Raw Ollama PR output (attempt 2):\n", raw_retry, "\n")
 
     data_retry = safe_parse_json(raw_retry)
-    if not data_retry:
-        print("⚠️ Ollama PR JSON invalid twice, fallback used.")
-        return None, None
+    if data_retry:
+        try:
+            return build_pr(data_retry)
+        except Exception:
+            pass
+    plain_retry_title, plain_retry_body = extract_plain_pr(raw_retry)
+    if plain_retry_title and plain_retry_body:
+        print("⚠️ Ollama PR JSON invalid on retry, using plain-text PR from model output.")
+        return plain_retry_title, plain_retry_body
 
-    try:
-        return build_pr(data_retry)
-    except Exception as e:
-        print(f"⚠️ Ollama PR shape invalid, fallback used. Reason: {e}")
-        return None, None
+    plain_system = (
+        "Return plain text only with this exact structure:\n"
+        "TITLE: <max 80 chars>\n"
+        "## What\n"
+        "...\n"
+        "## Why\n"
+        "...\n"
+        "## Testing\n"
+        "...\n"
+        "## Notes\n"
+        "...\n"
+        "Do not invent tests; if unknown write that testing evidence is not provided."
+    )
+    raw_plain = chat_json(
+        [
+            {"role": "system", "content": plain_system},
+            {"role": "user", "content": pr_user},
+        ],
+        temperature=0.1,
+        json_mode=False,
+    )
+    if os.getenv("OLLAMA_DEBUG", "0") == "1":
+        print("\n[DEBUG] Raw Ollama PR output (plain recovery):\n", raw_plain, "\n")
+
+    plain_recovery_title, plain_recovery_body = extract_plain_pr(raw_plain)
+    if plain_recovery_title and plain_recovery_body:
+        print("⚠️ Ollama PR JSON invalid, plain recovery mode used.")
+        return plain_recovery_title, plain_recovery_body
+
+    print("⚠️ Ollama PR output unusable, fallback used.")
+    return None, None
 
 
 # ---------------- Main PR flow ----------------

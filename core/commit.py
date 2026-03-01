@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import datetime
 from collections import Counter
 from rich.console import Console
@@ -17,6 +18,91 @@ ROOT_DIRS = [
 DEFAULT_BRANCH = "staging"
 
 TYPE_PRIORITY = ["fix", "feat", "refactor", "docs", "ui", "chore"]
+COMMIT_HEADER_RE = re.compile(
+    r"^(feat|fix|refactor|docs|test|chore|perf|ci|build|style|ui)(\([^)]+\))?(!)?: .+$",
+    re.IGNORECASE,
+)
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= minimum else default
+
+
+def trim_text_middle(text: str, max_chars: int) -> str:
+    text = text or ""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+
+    marker = "\n\n... [truncated for model context] ...\n\n"
+    if max_chars <= len(marker) + 50:
+        return text[:max_chars]
+
+    head = int(max_chars * 0.7)
+    tail = max_chars - head - len(marker)
+    if tail < 0:
+        tail = 0
+    return text[:head] + marker + text[-tail:]
+
+
+def extract_plain_commit(raw: str) -> str | None:
+    """
+    Best-effort extraction when model output is not valid JSON.
+    Keeps a proper Conventional Commit header and optional bullet body.
+    """
+    if not raw:
+        return None
+
+    cleaned: list[str] = []
+    for line in raw.replace("\r\n", "\n").splitlines():
+        s = line.rstrip()
+        if s.strip().startswith("```"):
+            continue
+        cleaned.append(s)
+
+    non_empty = [l.strip() for l in cleaned if l.strip()]
+    if not non_empty:
+        return None
+
+    header_idx = -1
+    header = ""
+    for idx, line in enumerate(non_empty):
+        candidate = line
+        if line.lower().startswith("commit:"):
+            candidate = line.split(":", 1)[1].strip()
+        if COMMIT_HEADER_RE.match(candidate):
+            header_idx = idx
+            header = candidate
+            break
+
+    if not header:
+        return None
+
+    body_lines: list[str] = []
+    for line in non_empty[header_idx + 1 :]:
+        if COMMIT_HEADER_RE.match(line):
+            break
+        text = line
+        if text.lower().startswith("body:"):
+            text = text.split(":", 1)[1].strip()
+        text = text.strip()
+        if not text:
+            continue
+        if not text.startswith("- "):
+            text = f"- {text}"
+        body_lines.append(text)
+        if len(body_lines) >= 6:
+            break
+
+    if body_lines:
+        return f"{header}\n\n" + "\n".join(body_lines)
+    return header
 
 
 def is_git_repo(path: str) -> bool:
@@ -126,10 +212,19 @@ def generate_commit_message_with_ollama(repo: str, files: list[str], diff_conten
             return None
 
     try:
+        max_files = _env_int("OLLAMA_MAX_FILES", 80, minimum=1)
+        files_for_prompt = files[:max_files]
+        files_block = "\n".join(f"- {f}" for f in files_for_prompt) or "- (unknown)"
+        if len(files) > max_files:
+            files_block += f"\n- ... (+{len(files) - max_files} more)"
+
+        max_diff_chars = _env_int("OLLAMA_MAX_DIFF_CHARS", 4500, minimum=800)
+        trimmed_diff = trim_text_middle(diff_content, max_diff_chars)
+
         user_prompt = COMMIT_USER_TEMPLATE.format(
             repo=repo,
-            files="\n".join(f"- {f}" for f in files) or "- (unknown)",
-            diff=diff_content[:12000],  # garde-fou
+            files=files_block,
+            diff=trimmed_diff,
         )
         messages = [
             {"role": "system", "content": COMMIT_SYSTEM},
@@ -148,6 +243,10 @@ def generate_commit_message_with_ollama(repo: str, files: list[str], diff_conten
         built = parse_and_build(raw)
         if built:
             return built
+        plain = extract_plain_commit(raw)
+        if plain:
+            print("⚠️ Ollama JSON invalid, using plain-text commit from model output.")
+            return plain
 
         print("⚠️ Ollama output is not valid commit JSON, retrying once.")
         with console.status("[bold cyan]🤖 Retrying commit message generation...[/]", spinner="dots"):
@@ -162,8 +261,35 @@ def generate_commit_message_with_ollama(repo: str, files: list[str], diff_conten
         built_retry = parse_and_build(raw_retry)
         if built_retry:
             return built_retry
+        plain_retry = extract_plain_commit(raw_retry)
+        if plain_retry:
+            print("⚠️ Ollama JSON invalid on retry, using plain-text commit from model output.")
+            return plain_retry
 
-        print("⚠️ Ollama returned invalid JSON twice, fallback used.")
+        plain_system = (
+            "Return ONLY a Conventional Commit message in plain text.\n"
+            "First line format: type(scope optional): subject\n"
+            "Allowed types: feat, fix, refactor, docs, test, chore, perf, ci, build, style.\n"
+            "Optional body lines must be bullets prefixed by '- '."
+        )
+        with console.status("[bold cyan]🤖 Recovering commit message (plain mode)...[/]", spinner="dots"):
+            raw_plain = chat_json(
+                [
+                    {"role": "system", "content": plain_system},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.1,
+                json_mode=False,
+            )
+        if os.getenv("OLLAMA_DEBUG", "0") == "1":
+            print("\n[DEBUG] Raw Ollama output (plain recovery):\n", raw_plain, "\n")
+
+        plain_recovery = extract_plain_commit(raw_plain)
+        if plain_recovery:
+            print("⚠️ Ollama JSON invalid, plain recovery mode used.")
+            return plain_recovery
+
+        print("⚠️ Ollama returned unusable output, fallback used.")
         return None
     except OllamaError as e:
         print(f"⚠️ Ollama unavailable, fallback used. Reason: {e}")

@@ -18,6 +18,18 @@ def _resolve_timeout(raw_timeout: str) -> float:
         return DEFAULT_TIMEOUT
 
 
+def _resolve_optional_int(raw_value: str | None, minimum: int = 1) -> int | None:
+    if raw_value is None:
+        return None
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return None
+    if value < minimum:
+        return None
+    return value
+
+
 def chat_json(
     messages,
     model: str | None = None,
@@ -40,6 +52,11 @@ def chat_json(
             "temperature": temperature,
         },
     }
+
+    num_ctx = _resolve_optional_int(os.getenv("OLLAMA_NUM_CTX"), minimum=512)
+    if num_ctx is not None:
+        payload["options"]["num_ctx"] = num_ctx
+
     if json_mode:
         payload["format"] = "json"
 
