@@ -100,10 +100,16 @@ def tag_release_interactive(repo_path: str, repo_name: str, commit_summary: str)
 
     print(f"\n🏷️  Versioning for [bold green]{repo_name}[/]")
     print(f"Last tag: {last_tag or '(none)'}")
-    print(f"Auto bump suggestion: [bold cyan]{auto_bump}[/]")
-    print(f"Suggested next tag: [bold yellow]{suggested}[/]")
+    print(
+        "Choose bump: "
+        "[bold red]major[/] / "
+        "[bold yellow]minor[/] / "
+        "[bold green]patch[/]"
+    )
+    print(f"Auto suggestion: [bold cyan]{auto_bump}[/]")
+    print(f"Suggested next tag: [bold magenta]{suggested}[/]")
 
-    choice = input("Choose bump (major/minor/patch) or press Enter to accept suggestion: ").strip().lower()
+    choice = input("👉 Choose bump (major/minor/patch) or press Enter to accept suggestion: ").strip().lower()
     bump = choice if choice in ("major", "minor", "patch") else auto_bump
     tag = compute_next_version(repo_path, bump, default_first="v0.1.0")
 
