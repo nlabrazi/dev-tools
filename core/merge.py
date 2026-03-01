@@ -6,6 +6,7 @@ from rich import print
 from rich.console import Console
 
 from utils.common import run_command
+from utils.console import ask_yes_no
 from core.ollama import chat_json, OllamaError
 from core.prompts import PR_SYSTEM, PR_USER_TEMPLATE
 from core.formatters import safe_parse_json, build_pr
@@ -192,8 +193,8 @@ def tag_release_interactive(repo_path: str, repo_name: str, commit_summary: str)
     bump = choice if choice in ("major", "minor", "patch") else auto_bump
     tag = compute_next_version(repo_path, bump, default_first="v0.1.0")
 
-    confirm = input(f"Create and push tag {tag}? (y/n): ").strip().lower()
-    if confirm != "y":
+    confirm = ask_yes_no(f"Create and push tag {tag} ?", default="n")
+    if not confirm:
         print("⏭️  Skipped tagging.")
         return
 
@@ -430,8 +431,7 @@ _Auto-generated on {date_str}_
         print(f"\n📘 Repository: [bold orange]{repo_name}[/]")
         print(f"--- Pull Request Preview ---\nTitle: {title}\n\n{body}\n---\n")
 
-        confirm = input("🚀 Do you want to create and auto-merge this PR? (y/n): ").strip().lower()
-        if confirm != "y":
+        if not ask_yes_no("🚀 Do you want to create and auto-merge this PR?", default="n"):
             print("❌ Skipped.\n")
             return
 

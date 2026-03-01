@@ -5,6 +5,7 @@ from collections import defaultdict
 from rich import print
 from rich.panel import Panel
 from rich.console import Console
+from utils.console import ask_yes_no
 
 console = Console()
 
@@ -142,12 +143,14 @@ def update_all_repos_interactive(root_dirs):
             )
             console.print(repo_panel)
 
-            user_input = input("✍️ Write changelog? (y/n): ").strip().lower()
-            if user_input == "y":
+            if ask_yes_no("✍️ Write changelog ?", default="n"):
                 update_changelog(repo_path, changelog_preview)
                 print(f"✅ Changelog updated for {repo}")
 
-                commit_input = input("📤 Do you want to commit and push the changelog? (y/n): ").strip().lower()
+                if ask_yes_no("📤 Do you want to commit and push the changelog ?", default="n"):
+                    commit_input = "y"
+                else:
+                    commit_input = "n"
                 if commit_input == "y":
                     commit_and_push_changelog(repo_path)
             else:
