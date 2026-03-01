@@ -270,7 +270,7 @@ _Auto-generated on {date_str}_
 
         confirm = input("🚀 Do you want to create and auto-merge this PR? (y/n): ").strip().lower()
         if confirm != "y":
-            print("❌ Skipped.")
+            print("❌ Skipped.\n")
             return
 
         with console.status("[bold green]Creating pull request...", spinner="dots"):

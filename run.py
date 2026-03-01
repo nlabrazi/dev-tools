@@ -41,21 +41,21 @@ def main():
 
     # --- STEP 1: AUTO-COMMIT ---
     section_title("Auto-commit staging", "🔧")
-    run_commit = input("Run auto-commit on all repos? (y/n): ").strip().lower()
+    run_commit = input("Browse repos and run auto-commit ? (y/n): ").strip().lower()
     if run_commit == "y":
         auto_commit_all_repos(ROOT_DIRS)
 
-    # --- STEP 2: CHANGELOG ---
-    section_title("Update changelogs", "📝")
-    run_changelog = input("Update changelogs? (y/n): ").strip().lower()
-    if run_changelog == "y":
-        update_all_repos_interactive(ROOT_DIRS)
-
-    # --- STEP 3: MERGE ---
+    # --- STEP 2: MERGE ---
     section_title("Merge to master", "🔁")
     run_merge = input("Merge staging into master? (y/n): ").strip().lower()
     if run_merge == "y":
         merge.main()
+
+    # --- STEP 3: CHANGELOG ---
+    section_title("Update changelogs", "📝")
+    run_changelog = input("Update changelogs? (y/n): ").strip().lower()
+    if run_changelog == "y":
+        update_all_repos_interactive(ROOT_DIRS)
 
     print(f"\n[bold cyan]{figlet_format('All Done!', font='slant')}[/]")
 
