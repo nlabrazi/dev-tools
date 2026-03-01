@@ -5,6 +5,7 @@ from collections import Counter
 from rich.console import Console
 
 from utils.common import run_command
+from utils.console import ask_yes_no
 from core.ollama import chat_json, OllamaError
 from core.prompts import COMMIT_SYSTEM, COMMIT_USER_TEMPLATE
 from core.formatters import safe_parse_json, build_conventional_commit
@@ -357,8 +358,8 @@ def auto_commit_all_repos(root_dirs: list[str]):
                 print("🟡 Changes detected but nothing staged yet.")
                 print("   Tip: we need staged changes to build commit message from --cached.")
 
-                choice = input("➕ Stage ALL changes (git add -A) ? (y/n): ").strip().lower()
-                if choice == "y":
+                choice = ask_yes_no("➕ Stage ALL changes (git add -A) ?", default="n")
+                if choice:
                     run_command(["git", "add", "-A"], cwd=repo_path)
                     staged = True
                 else:
@@ -395,8 +396,8 @@ def auto_commit_all_repos(root_dirs: list[str]):
             print(commit_message)
             print("\n--- End preview ---\n")
 
-            user_input = input("✍️ Do you want to commit this change? (y/n): ").strip().lower()
-            if user_input != "y":
+            user_input = ask_yes_no("✍️ Do you want to commit this change?", default="n")
+            if not user_input:
                 print("⏹️ Skipped commit.")
                 continue
 
@@ -408,8 +409,8 @@ def auto_commit_all_repos(root_dirs: list[str]):
 
             print("✅ Commit done.\n")
 
-            push_input = input(f"📤 Do you want to push to {DEFAULT_BRANCH}? (y/n): ").strip().lower()
-            if push_input == "y":
+            push_input = ask_yes_no(f"📤 Do you want to push to {DEFAULT_BRANCH} ?", default="n")
+            if push_input:
                 with console.status("[bold cyan]Pushing...[/]", spinner="dots"):
                     res = run_command(["git", "push", "origin", DEFAULT_BRANCH], cwd=repo_path)
                     if res.returncode != 0:

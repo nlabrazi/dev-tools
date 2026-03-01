@@ -3,9 +3,11 @@ from rich.console import Console
 from rich.panel import Panel
 from pyfiglet import figlet_format
 from utils.common import set_dry_run
+from utils.console import ask_yes_no
 from core.commit import auto_commit_all_repos
 from core.changelog import update_all_repos_interactive
 import core.merge as merge
+import core.sync as sync
 import argparse
 import os
 
@@ -41,21 +43,23 @@ def main():
 
     # --- STEP 1: AUTO-COMMIT ---
     section_title("Auto-commit staging", "🔧")
-    run_commit = input("Browse repos and run auto-commit ? (y/n): ").strip().lower()
-    if run_commit == "y":
+    if ask_yes_no("Browse repos and run auto-commit ?", default="n"):
         auto_commit_all_repos(ROOT_DIRS)
 
     # --- STEP 2: MERGE ---
     section_title("Merge to master", "🔁")
-    run_merge = input("Merge staging into master? (y/n): ").strip().lower()
-    if run_merge == "y":
+    if ask_yes_no("Merge staging into master ?", default="n"):
         merge.main()
 
     # --- STEP 3: CHANGELOG ---
     section_title("Update changelogs", "📝")
-    run_changelog = input("Update changelogs? (y/n): ").strip().lower()
-    if run_changelog == "y":
+    if ask_yes_no("Update changelogs ?", default="n"):
         update_all_repos_interactive(ROOT_DIRS)
+
+    # --- STEP 4: SYNC MASTER ---
+    section_title("Sync master from origin", "⏳")
+    if ask_yes_no("Checkout master + pull origin/master on all repos ?", default="n"):
+        sync.main(ROOT_DIRS)
 
     print(f"\n[bold cyan]{figlet_format('All Done!', font='slant')}[/]")
 
