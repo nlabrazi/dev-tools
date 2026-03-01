@@ -2,12 +2,13 @@ import os
 import json
 import urllib.request
 import urllib.error
+import time
 from datetime import datetime
+
 from rich import print
 from rich.console import Console
 
 from utils.common import run_command
-
 from core.versioning import (
     compute_next_version,
     determine_bump_from_commits,
@@ -32,6 +33,8 @@ ENABLE_OLLAMA = os.getenv("ENABLE_OLLAMA", "1") == "1"
 console = Console()
 
 
+# ---------------- Git helpers ----------------
+
 def is_git_repo(path: str) -> bool:
     return os.path.isdir(os.path.join(path, ".git"))
 
@@ -44,12 +47,38 @@ def run_git_command(path: str, args: list[str]) -> str:
     return (result.stdout or "").strip()
 
 
+def get_current_branch(path: str) -> str:
+    return run_git_command(path, ["branch", "--show-current"])
+
+
+def ensure_clean_worktree(path: str) -> None:
+    """
+    Ensure no pending changes and no merge in progress (avoid undefined state).
+    """
+    status = run_git_command(path, ["status", "--porcelain"])
+    if status.strip():
+        raise RuntimeError("Working tree is not clean (uncommitted changes detected).")
+
+    # Merge in progress?
+    merge_head = os.path.join(path, ".git", "MERGE_HEAD")
+    if os.path.exists(merge_head):
+        raise RuntimeError("Merge in progress detected (.git/MERGE_HEAD exists). Resolve/abort it first.")
+
+
+def checkout_update_master(repo_path: str) -> None:
+    run_command(["git", "fetch", "--all", "--prune"], cwd=repo_path, silent=True)
+    run_command(["git", "fetch", "--tags"], cwd=repo_path, silent=True)
+    run_command(["git", "checkout", DEFAULT_BASE_BRANCH], cwd=repo_path)
+    run_command(["git", "pull", "--ff-only"], cwd=repo_path)
+
+
 def repo_has_diff_between_staging_and_master(path: str) -> bool:
     # Fetch remote refs
     run_command(["git", "fetch"], cwd=path, silent=True)
 
     base_commit = run_git_command(
-        path, ["merge-base", f"origin/{DEFAULT_BASE_BRANCH}", f"origin/{DEFAULT_HEAD_BRANCH}"]
+        path,
+        ["merge-base", f"origin/{DEFAULT_BASE_BRANCH}", f"origin/{DEFAULT_HEAD_BRANCH}"],
     )
     head_commit = run_git_command(path, ["rev-parse", f"origin/{DEFAULT_HEAD_BRANCH}"])
 
@@ -63,7 +92,12 @@ def get_commit_summary(path: str) -> str:
     )
 
 
+# ---------------- GitHub CLI helpers ----------------
+
 def existing_pr_number(path: str) -> str:
+    """
+    Returns PR number if a PR already exists for base=head pair, else "".
+    """
     result = run_command(
         [
             "gh",
@@ -83,12 +117,63 @@ def existing_pr_number(path: str) -> str:
     return (result.stdout or "").strip()
 
 
-def checkout_update_master(repo_path: str) -> None:
-    run_command(["git", "fetch", "--all", "--prune"], cwd=repo_path, silent=True)
-    run_command(["git", "fetch", "--tags"], cwd=repo_path, silent=True)
-    run_command(["git", "checkout", DEFAULT_BASE_BRANCH], cwd=repo_path)
-    run_command(["git", "pull", "--ff-only"], cwd=repo_path)
+def get_pr_number_from_url(repo_path: str, pr_url: str) -> str:
+    result = run_command(
+        ["gh", "pr", "view", pr_url, "--json", "number", "--jq", ".number"],
+        cwd=repo_path,
+    )
+    return (result.stdout or "").strip()
 
+
+def merge_pr_with_retry(repo_path: str, repo_name: str, pr_number: str, max_attempts: int = 8) -> bool:
+    """
+    Enables auto-merge for a PR. Retries on transient GitHub states:
+    - mergeability not computed yet
+    - required checks not started/attached yet
+    - temporary GraphQL issues
+    Returns True if command succeeds, else False.
+    """
+    transient_markers = [
+        "unstable",
+        "not mergeable",
+        "mergeable",
+        "required checks",
+        "checks",
+        "queued",
+        "merge queue",
+        "GraphQL".lower(),
+        "timed out",
+        "try again",
+        "must be up to date",  # can happen briefly right after PR creation / checks
+    ]
+
+    for attempt in range(1, max_attempts + 1):
+        merge_result = run_command(
+            ["gh", "pr", "merge", pr_number, "--merge", "--auto"],
+            cwd=repo_path,
+        )
+
+        if merge_result.returncode == 0:
+            return True
+
+        combined = ((merge_result.stderr or "") + "\n" + (merge_result.stdout or "")).strip()
+        lower = combined.lower()
+
+        # Decide if we retry
+        is_transient = any(marker in lower for marker in transient_markers)
+        if not is_transient:
+            print(f"❌ Failed to merge PR for {repo_name} (non-transient). Reason:\n{combined}")
+            return False
+
+        wait_s = min(2 * attempt, 12)  # 2s, 4s, 6s... capped
+        print(f"⏳ PR not ready yet for {repo_name} (attempt {attempt}/{max_attempts}). Retrying in {wait_s}s...")
+        time.sleep(wait_s)
+
+    print(f"❌ Failed to merge PR for {repo_name} after {max_attempts} attempts (still transient).")
+    return False
+
+
+# ---------------- Versioning / tagging ----------------
 
 def tag_release_interactive(repo_path: str, repo_name: str, commit_summary: str) -> None:
     """
@@ -196,7 +281,6 @@ Rules:
 - Keep it concise and accurate from the commit summary.
 """
 
-    # Guard size (Ollama can choke on huge text)
     commit_summary_trimmed = commit_summary.strip()
     if len(commit_summary_trimmed) > 12000:
         commit_summary_trimmed = commit_summary_trimmed[:12000] + "\n- (truncated)"
@@ -233,6 +317,18 @@ Commits included:
 # ---------------- Main PR flow ----------------
 
 def create_and_merge_pr(path: str, repo_name: str) -> None:
+    # Safety first
+    try:
+        ensure_clean_worktree(path)
+    except Exception as e:
+        print(f"❌ {repo_name}: {e}")
+        return
+
+    # Debug: show current branch (we *do not* depend on it anymore)
+    current = get_current_branch(path)
+    if current:
+        print(f"🔎 Current branch (info only): [bold]{current}[/]")
+
     date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     commit_summary = get_commit_summary(path)
 
@@ -267,7 +363,10 @@ _Auto-generated on {date_str}_
     title = title or fallback_title
     body = body or fallback_body
 
+    # Check existing PR
     pr_number = existing_pr_number(path)
+    created_pr_url = None
+
     if pr_number:
         print(f"🔗 Existing Pull Request detected: #{pr_number}")
     else:
@@ -281,11 +380,13 @@ _Auto-generated on {date_str}_
 
         with console.status("[bold green]Creating pull request...", spinner="dots"):
             result = run_command(
-                ["gh", "pr", "create",
-                 "--base", DEFAULT_BASE_BRANCH,
-                 "--head", DEFAULT_HEAD_BRANCH,
-                 "--title", title,
-                 "--body", body],
+                [
+                    "gh", "pr", "create",
+                    "--base", DEFAULT_BASE_BRANCH,
+                    "--head", DEFAULT_HEAD_BRANCH,
+                    "--title", title,
+                    "--body", body,
+                ],
                 cwd=path,
             )
 
@@ -294,31 +395,32 @@ _Auto-generated on {date_str}_
             print(f"❌ Failed to create Pull Request for {repo_name}. Reason:\n{stderr}")
             return
 
-        pr_url = None
+        # Extract URL from output
         for line in (result.stdout or "").strip().splitlines():
             if line.startswith("https://github.com/"):
-                pr_url = line
+                created_pr_url = line.strip()
                 break
 
-        if pr_url:
-            print(f"🔗 Pull Request created: {pr_url}")
-        else:
+        if not created_pr_url:
             print("❌ Pull Request URL not found")
             return
 
-    # Merge the PR (new or existing)
-    with console.status("[bold cyan]Merging pull request...", spinner="dots"):
-        merge_result = run_command(
-            ["gh", "pr", "merge", "--merge", "--auto"],
-            cwd=path,
-        )
+        print(f"🔗 Pull Request created: {created_pr_url}")
 
-    if merge_result.returncode != 0:
-        stderr = (merge_result.stderr or "").strip()
-        print(f"❌ Failed to merge PR for {repo_name}. Reason:\n{stderr}")
+        # Resolve PR number reliably
+        pr_number = get_pr_number_from_url(path, created_pr_url)
+        if not pr_number:
+            print("❌ Could not resolve PR number from URL.")
+            return
+
+    # Merge the PR (existing or newly created) - ALWAYS target by PR number
+    with console.status("[bold cyan]Merging pull request (auto)...", spinner="dots"):
+        ok = merge_pr_with_retry(path, repo_name, pr_number)
+
+    if not ok:
         return
 
-    print(f"✅ PR merged successfully for [bold green]{repo_name}[/]\n")
+    print(f"✅ PR merge/auto-merge successfully triggered for [bold green]{repo_name}[/]\n")
 
     # Refresh local master and tag the release
     try:
