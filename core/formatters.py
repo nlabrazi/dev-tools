@@ -17,12 +17,15 @@ def safe_parse_json(raw: str) -> Optional[Dict[str, Any]]:
 
     def normalize(parsed: Dict[str, Any]) -> Dict[str, Any]:
         """
-        If model returned commit fields at top-level instead of {"commit": {...}},
+        If model returned fields at top-level instead of nested object,
         wrap them automatically.
         """
         if isinstance(parsed, dict) and "commit" not in parsed:
             if any(k in parsed for k in ("type", "scope", "subject", "body", "breaking")):
                 return {"commit": parsed}
+        if isinstance(parsed, dict) and "mr" not in parsed:
+            if any(k in parsed for k in ("title", "description")):
+                return {"mr": parsed}
         return parsed
 
     # Fast path
