@@ -5,7 +5,9 @@ from datetime import datetime
 from rich import print
 from rich.console import Console
 
-from utils.common import run_command
+from core.config import DEFAULT_BASE_BRANCH, DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE, ROOT_DIRS
+from core.repositories import iter_git_repositories
+from utils.common import env_int, run_command, run_command_checked, trim_text_middle
 from utils.console import ask_yes_no
 from core.ollama import chat_json, OllamaError
 from core.prompts import PR_SYSTEM, PR_USER_TEMPLATE
@@ -17,28 +19,18 @@ from core.versioning import (
     get_last_semver_tag,
 )
 
-ROOT_DIRS = [
-    os.path.expanduser("~/code/pers"),
-    os.path.expanduser("~/code/bricolage"),
-]
-
-DEFAULT_BASE_BRANCH = "master"
-DEFAULT_HEAD_BRANCH = "staging"
-
 console = Console()
 
 
 # ---------------- Git helpers ----------------
 
-def is_git_repo(path: str) -> bool:
-    return os.path.isdir(os.path.join(path, ".git"))
-
-
 def run_git_command(path: str, args: list[str]) -> str:
     """
     Run git command in repo path and return stdout stripped.
     """
-    result = run_command(["git"] + args, cwd=path)
+    result = run_command(["git"] + args, cwd=path, silent=True)
+    if result.returncode != 0:
+        return ""
     return (result.stdout or "").strip()
 
 
@@ -54,28 +46,49 @@ def ensure_clean_worktree(path: str) -> None:
     if status.strip():
         raise RuntimeError("Working tree is not clean (uncommitted changes detected).")
 
-    # Merge in progress?
-    merge_head = os.path.join(path, ".git", "MERGE_HEAD")
-    if os.path.exists(merge_head):
+    merge_head = run_git_command(path, ["rev-parse", "--git-path", "MERGE_HEAD"])
+    if merge_head:
+        merge_head_path = merge_head if os.path.isabs(merge_head) else os.path.join(path, merge_head)
+    else:
+        merge_head_path = os.path.join(path, ".git", "MERGE_HEAD")
+    if os.path.exists(merge_head_path):
         raise RuntimeError("Merge in progress detected (.git/MERGE_HEAD exists). Resolve/abort it first.")
 
 
-def checkout_update_master(repo_path: str) -> None:
-    run_command(["git", "fetch", "--all", "--prune"], cwd=repo_path, silent=True)
-    run_command(["git", "fetch", "--tags"], cwd=repo_path, silent=True)
-    run_command(["git", "checkout", DEFAULT_BASE_BRANCH], cwd=repo_path)
-    run_command(["git", "pull", "--ff-only"], cwd=repo_path)
+def checkout_update_base_branch(repo_path: str) -> None:
+    run_command_checked(
+        ["git", "fetch", "--all", "--prune"],
+        cwd=repo_path,
+        silent=True,
+        context="fetch remote branches",
+    )
+    run_command_checked(
+        ["git", "fetch", "--tags"],
+        cwd=repo_path,
+        silent=True,
+        context="fetch tags",
+    )
+    run_command_checked(
+        ["git", "checkout", DEFAULT_BASE_BRANCH],
+        cwd=repo_path,
+        context=f"checkout {DEFAULT_BASE_BRANCH}",
+    )
+    run_command_checked(
+        ["git", "pull", "--ff-only", DEFAULT_REMOTE, DEFAULT_BASE_BRANCH],
+        cwd=repo_path,
+        context=f"pull {DEFAULT_REMOTE}/{DEFAULT_BASE_BRANCH}",
+    )
 
 
-def repo_has_diff_between_staging_and_master(path: str) -> bool:
+def repo_has_branch_diff(path: str) -> bool:
     # Fetch remote refs
-    run_command(["git", "fetch"], cwd=path, silent=True)
+    run_command(["git", "fetch", DEFAULT_REMOTE], cwd=path, silent=True)
 
     base_commit = run_git_command(
         path,
-        ["merge-base", f"origin/{DEFAULT_BASE_BRANCH}", f"origin/{DEFAULT_HEAD_BRANCH}"],
+        ["merge-base", f"{DEFAULT_REMOTE}/{DEFAULT_BASE_BRANCH}", f"{DEFAULT_REMOTE}/{DEFAULT_HEAD_BRANCH}"],
     )
-    head_commit = run_git_command(path, ["rev-parse", f"origin/{DEFAULT_HEAD_BRANCH}"])
+    head_commit = run_git_command(path, ["rev-parse", f"{DEFAULT_REMOTE}/{DEFAULT_HEAD_BRANCH}"])
 
     return bool(base_commit) and bool(head_commit) and base_commit != head_commit
 
@@ -83,7 +96,7 @@ def repo_has_diff_between_staging_and_master(path: str) -> bool:
 def get_commit_summary(path: str) -> str:
     return run_git_command(
         path,
-        ["log", f"origin/{DEFAULT_BASE_BRANCH}..origin/{DEFAULT_HEAD_BRANCH}", "--pretty=format:- %s"],
+        ["log", f"{DEFAULT_REMOTE}/{DEFAULT_BASE_BRANCH}..{DEFAULT_REMOTE}/{DEFAULT_HEAD_BRANCH}", "--pretty=format:- %s"],
     )
 
 
@@ -118,6 +131,27 @@ def get_pr_number_from_url(repo_path: str, pr_url: str) -> str:
         cwd=repo_path,
     )
     return (result.stdout or "").strip()
+
+
+def get_pr_status(repo_path: str, pr_number: str) -> dict | None:
+    result = run_command(
+        [
+            "gh",
+            "pr",
+            "view",
+            pr_number,
+            "--json",
+            "state,mergedAt,mergeStateStatus,isDraft",
+        ],
+        cwd=repo_path,
+    )
+    if result.returncode != 0:
+        return None
+
+    data = safe_parse_json(result.stdout or "")
+    if isinstance(data, dict):
+        return data
+    return None
 
 
 def merge_pr_with_retry(repo_path: str, repo_name: str, pr_number: str, max_attempts: int = 8) -> bool:
@@ -168,6 +202,27 @@ def merge_pr_with_retry(repo_path: str, repo_name: str, pr_number: str, max_atte
     return False
 
 
+def wait_for_pr_merge(repo_path: str, repo_name: str, pr_number: str, timeout_seconds: int = 90) -> bool:
+    deadline = time.time() + max(timeout_seconds, 5)
+
+    while time.time() < deadline:
+        status = get_pr_status(repo_path, pr_number)
+        if status:
+            if status.get("state") == "MERGED" or status.get("mergedAt"):
+                return True
+            if status.get("state") == "CLOSED":
+                print(f"❌ PR #{pr_number} for {repo_name} is closed without merge.")
+                return False
+
+        time.sleep(5)
+
+    print(
+        f"⏭️ PR #{pr_number} for {repo_name} is not merged yet. "
+        "Release sync/tagging skipped until the merge is effective."
+    )
+    return False
+
+
 # ---------------- Versioning / tagging ----------------
 
 def tag_release_interactive(repo_path: str, repo_name: str, commit_summary: str) -> None:
@@ -204,33 +259,6 @@ def tag_release_interactive(repo_path: str, repo_name: str, commit_summary: str)
 
 def is_ollama_enabled() -> bool:
     return os.getenv("ENABLE_OLLAMA", "1") == "1"
-
-
-def _env_int(name: str, default: int, minimum: int = 1) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    return value if value >= minimum else default
-
-
-def trim_text_middle(text: str, max_chars: int) -> str:
-    text = text or ""
-    if max_chars <= 0 or len(text) <= max_chars:
-        return text
-
-    marker = "\n\n... [truncated for model context] ...\n\n"
-    if max_chars <= len(marker) + 50:
-        return text[:max_chars]
-
-    head = int(max_chars * 0.7)
-    tail = max_chars - head - len(marker)
-    if tail < 0:
-        tail = 0
-    return text[:head] + marker + text[-tail:]
 
 
 def extract_plain_pr(raw: str) -> tuple[str | None, str | None]:
@@ -294,7 +322,7 @@ def generate_pr_text_with_ollama(repo_name: str, commit_summary: str) -> tuple[s
     if not is_ollama_enabled():
         return None, None
 
-    max_summary_chars = _env_int("OLLAMA_MAX_PR_SUMMARY_CHARS", 5000, minimum=1200)
+    max_summary_chars = env_int("OLLAMA_MAX_PR_SUMMARY_CHARS", 5000, minimum=1200)
     commit_summary_trimmed = trim_text_middle(commit_summary.strip(), max_summary_chars)
 
     pr_user = PR_USER_TEMPLATE.format(
@@ -395,10 +423,10 @@ def create_and_merge_pr(path: str, repo_name: str) -> None:
         return
 
     # Fallback PR text
-    fallback_title = f"🔀 chore: merge staging into master ({date_str})"
+    fallback_title = f"🔀 chore: merge {DEFAULT_HEAD_BRANCH} into {DEFAULT_BASE_BRANCH} ({date_str})"
     fallback_body = f"""## 📦 Merge Summary
 
-This pull request merges the latest validated commits from `staging` into `master`.
+This pull request merges the latest validated commits from `{DEFAULT_HEAD_BRANCH}` into `{DEFAULT_BASE_BRANCH}`.
 
 ---
 
@@ -479,34 +507,41 @@ _Auto-generated on {date_str}_
 
     print(f"✅ PR merge/auto-merge successfully triggered for [bold green]{repo_name}[/]\n")
 
-    # Refresh local master and tag the release
+    merge_timeout = env_int("GH_PR_MERGE_TIMEOUT", 90, minimum=5)
+    if not wait_for_pr_merge(path, repo_name, pr_number, timeout_seconds=merge_timeout):
+        return
+
+    print(f"✅ PR #{pr_number} is effectively merged for [bold green]{repo_name}[/]\n")
+
+    # Refresh local base branch and tag the release
     try:
-        checkout_update_master(path)
+        checkout_update_base_branch(path)
         tag_release_interactive(path, repo_name, commit_summary)
     except Exception as e:
         print(f"⚠️  Tagging step failed/skipped for {repo_name}: {e}")
 
 
-def main() -> None:
-    print("\n🔄 Scanning for repos with pending staging → master merges\n")
+def main(root_dirs: list[str] = ROOT_DIRS) -> None:
+    print(f"\n🔄 Scanning for repos with pending {DEFAULT_HEAD_BRANCH} → {DEFAULT_BASE_BRANCH} merges\n")
 
-    for root_dir in ROOT_DIRS:
+    for root_dir in root_dirs:
         console.print(f"\n📂 [bold yellow]Scanning root directory:[/] {root_dir}\n")
 
         if not os.path.isdir(root_dir):
             print(f"⚠️  Root directory not found: {root_dir}")
             continue
 
-        for repo in os.listdir(root_dir):
-            path = os.path.join(root_dir, repo)
-            if not is_git_repo(path):
-                continue
-
-            if repo_has_diff_between_staging_and_master(path):
+        found_repos = False
+        for repo, path in iter_git_repositories(root_dir):
+            found_repos = True
+            if repo_has_branch_diff(path):
                 print(f"📦 [bold green]Found pending merge for {repo}[/]")
                 create_and_merge_pr(path, repo)
             else:
-                print(f"✔️  [bold dark_orange]{repo}[/]: staging is up to date with master.")
+                print(f"✔️  [bold dark_orange]{repo}[/]: {DEFAULT_HEAD_BRANCH} is up to date with {DEFAULT_BASE_BRANCH}.")
+
+        if not found_repos:
+            print(f"⚠️  No repositories found in {root_dir}")
 
 
 if __name__ == "__main__":

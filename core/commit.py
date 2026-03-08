@@ -4,52 +4,20 @@ from datetime import datetime
 from collections import Counter
 from rich.console import Console
 
-from utils.common import run_command
+from utils.common import env_int, run_command, trim_text_middle
 from utils.console import ask_yes_no
+from core.config import DEFAULT_HEAD_BRANCH, ROOT_DIRS
+from core.repositories import iter_git_repositories
 from core.ollama import chat_json, OllamaError
 from core.prompts import COMMIT_SYSTEM, COMMIT_USER_TEMPLATE
 from core.formatters import safe_parse_json, build_conventional_commit
 
 console = Console()
 
-ROOT_DIRS = [
-    os.path.expanduser("~/code/pers"),
-    os.path.expanduser("~/code/bricolage"),
-]
-DEFAULT_BRANCH = "staging"
-
-TYPE_PRIORITY = ["fix", "feat", "refactor", "docs", "ui", "chore"]
 COMMIT_HEADER_RE = re.compile(
     r"^(feat|fix|refactor|docs|test|chore|perf|ci|build|style|ui)(\([^)]+\))?(!)?: .+$",
     re.IGNORECASE,
 )
-
-
-def _env_int(name: str, default: int, minimum: int = 1) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    return value if value >= minimum else default
-
-
-def trim_text_middle(text: str, max_chars: int) -> str:
-    text = text or ""
-    if max_chars <= 0 or len(text) <= max_chars:
-        return text
-
-    marker = "\n\n... [truncated for model context] ...\n\n"
-    if max_chars <= len(marker) + 50:
-        return text[:max_chars]
-
-    head = int(max_chars * 0.7)
-    tail = max_chars - head - len(marker)
-    if tail < 0:
-        tail = 0
-    return text[:head] + marker + text[-tail:]
 
 
 def extract_plain_commit(raw: str) -> str | None:
@@ -104,11 +72,6 @@ def extract_plain_commit(raw: str) -> str | None:
     if body_lines:
         return f"{header}\n\n" + "\n".join(body_lines)
     return header
-
-
-def is_git_repo(path: str) -> bool:
-    return os.path.isdir(os.path.join(path, ".git"))
-
 
 def is_comment_line(line: str) -> bool:
     stripped = line.lstrip()
@@ -188,7 +151,7 @@ def detect_commit_type_from_diff(diff_content: str) -> str:
         if ".md" in line or "documentation" in line:
             type_counter["docs"] += 1
         if ".css" in line or ".scss" in line or ".html" in line:
-            type_counter["ui"] += 1
+            type_counter["style"] += 1
         if ".json" in line or ".yml" in line or "config" in line or "build" in line:
             type_counter["chore"] += 1
 
@@ -213,13 +176,13 @@ def generate_commit_message_with_ollama(repo: str, files: list[str], diff_conten
             return None
 
     try:
-        max_files = _env_int("OLLAMA_MAX_FILES", 80, minimum=1)
+        max_files = env_int("OLLAMA_MAX_FILES", 80, minimum=1)
         files_for_prompt = files[:max_files]
         files_block = "\n".join(f"- {f}" for f in files_for_prompt) or "- (unknown)"
         if len(files) > max_files:
             files_block += f"\n- ... (+{len(files) - max_files} more)"
 
-        max_diff_chars = _env_int("OLLAMA_MAX_DIFF_CHARS", 4500, minimum=800)
+        max_diff_chars = env_int("OLLAMA_MAX_DIFF_CHARS", 4500, minimum=800)
         trimmed_diff = trim_text_middle(diff_content, max_diff_chars)
 
         user_prompt = COMMIT_USER_TEMPLATE.format(
@@ -336,11 +299,7 @@ def auto_commit_all_repos(root_dirs: list[str]):
             print(f"⚠️ Root directory not found: {root_dir}")
             continue
 
-        for repo in os.listdir(root_dir):
-            repo_path = os.path.join(root_dir, repo)
-            if not os.path.isdir(repo_path) or not is_git_repo(repo_path):
-                continue
-
+        for repo, repo_path in iter_git_repositories(root_dir):
             found_repos = True
 
             # 1) Status first (key fix)
@@ -360,7 +319,10 @@ def auto_commit_all_repos(root_dirs: list[str]):
 
                 choice = ask_yes_no("➕ Stage ALL changes (git add -A) ?", default="n")
                 if choice:
-                    run_command(["git", "add", "-A"], cwd=repo_path)
+                    add_result = run_command(["git", "add", "-A"], cwd=repo_path)
+                    if add_result.returncode != 0:
+                        print(f"❌ git add failed:\n{(add_result.stderr or '').strip()}")
+                        continue
                     staged = True
                 else:
                     print("⏭️ Skipped (nothing staged).")
@@ -409,15 +371,15 @@ def auto_commit_all_repos(root_dirs: list[str]):
 
             print("✅ Commit done.\n")
 
-            push_input = ask_yes_no(f"📤 Do you want to push to {DEFAULT_BRANCH} ?", default="n")
+            push_input = ask_yes_no(f"📤 Do you want to push to {DEFAULT_HEAD_BRANCH} ?", default="n")
             if push_input:
                 with console.status("[bold cyan]Pushing...[/]", spinner="dots"):
-                    res = run_command(["git", "push", "origin", DEFAULT_BRANCH], cwd=repo_path)
+                    res = run_command(["git", "push", "origin", DEFAULT_HEAD_BRANCH], cwd=repo_path)
                     if res.returncode != 0:
                         print(f"❌ git push failed:\n{(res.stderr or '').strip()}")
                     else:
                         results["pushed"] += 1
-                        print(f"🚀 Pushed to {DEFAULT_BRANCH}\n")
+                        print(f"🚀 Pushed to {DEFAULT_HEAD_BRANCH}\n")
             else:
                 print("⏭️ Skipped git push")
 

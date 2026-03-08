@@ -1,16 +1,15 @@
 # core/sync.py
 
 import os
+
+from core.config import DEFAULT_REMOTE, ROOT_DIRS
+from core.repositories import iter_git_repositories
 from rich.console import Console
 from utils.common import run_command
 from utils.console import ask_yes_no
 
 console = Console()
-REMOTE = "origin"
-
-
-def is_git_repo(path: str) -> bool:
-    return os.path.isdir(os.path.join(path, ".git"))
+REMOTE = DEFAULT_REMOTE
 
 
 def git_output(repo_path: str, args: list[str]) -> str:
@@ -121,13 +120,27 @@ def sync_default_branch(repo_path: str, repo_name: str) -> None:
 
     ahead, behind = counts
 
-    if behind <= 0:
+    if behind <= 0 and ahead <= 0:
         head = git_output(repo_path, ["rev-parse", "--short", "HEAD"])
         console.print(f"✔️  [green]{repo_name}[/]: {default_branch} up-to-date (HEAD {head})")
         return
+    if behind <= 0 and ahead > 0:
+        head = git_output(repo_path, ["rev-parse", "--short", "HEAD"])
+        console.print(
+            f"ℹ️  [cyan]{repo_name}[/]: {default_branch} is ahead of {REMOTE}/{default_branch} "
+            f"by {ahead} commit(s) (HEAD {head})"
+        )
+        return
 
     # There is an actual need to pull => ask y/n
-    if not ask_yes_no(f"{repo_name}: {default_branch} is behind origin by {behind} commit(s). Pull now?", default="y"):
+    if ahead > 0:
+        console.print(
+            f"⚠️  [yellow]{repo_name}[/]: {default_branch} diverged from {REMOTE}/{default_branch} "
+            f"(ahead {ahead}, behind {behind})."
+        )
+        return
+
+    if not ask_yes_no(f"{repo_name}: {default_branch} is behind {REMOTE} by {behind} commit(s). Pull now?", default="y"):
         console.print(f"⏭️  [yellow]{repo_name}[/]: skipped pull.")
         return
 
@@ -142,13 +155,14 @@ def sync_all_repos(root_dirs: list[str]) -> None:
             console.print(f"⚠️  Root directory not found: {root_dir}")
             continue
 
-        for repo in os.listdir(root_dir):
-            path = os.path.join(root_dir, repo)
-            if not is_git_repo(path):
-                continue
-
+        found_repos = False
+        for repo, path in iter_git_repositories(root_dir):
+            found_repos = True
             sync_default_branch(path, repo)
 
+        if not found_repos:
+            console.print(f"⚠️  No repositories found in {root_dir}")
 
-def main(root_dirs: list[str]) -> None:
+
+def main(root_dirs: list[str] = ROOT_DIRS) -> None:
     sync_all_repos(root_dirs)

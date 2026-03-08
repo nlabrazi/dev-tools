@@ -5,7 +5,6 @@
 [![Forks][forks-shield]][forks-url]
 [![Stargazers][stars-shield]][stars-url]
 [![Issues][issues-shield]][issues-url]
-[![MIT License][license-shield]][license-url]
 [![LinkedIn][linkedin-shield]][linkedin-url]
 
 
@@ -53,11 +52,12 @@
 <!-- DESCRIPTION -->
 ### ℹ️ Description
 
-This repository contains three powerful Python scripts to automate your daily Git tasks across multiple projects:
+This repository contains Python tooling to automate recurring Git workflows across multiple projects:
 
 - ✅ Automatically generate and validate commits (`commit.py`)
-- 📝 Update and commit `CHANGELOG.md` based on recent Git history (`update_changelog_all.py`)
-- 🔥 Create a pull request from staging and merge it to master (`merge.py`)
+- 📝 Update and commit `CHANGELOG.md` based on recent Git history (`core/changelog.py`)
+- 🔥 Create a pull request from the integration branch and merge it to the release branch (`merge.py`)
+- 🔄 Sync the default branch of all local repositories (`sync.py`)
 
 ---
 
@@ -85,13 +85,12 @@ This repository contains three powerful Python scripts to automate your daily Gi
 <!-- GETTING STARTED -->
 # ✅ Getting Started
 
-This project runs on 🐍 Python with scheduled jobs for pushing content to Telegram.
-Below are installation instructions for a Python-based project.
+This project runs on Python 3 and uses local Git/GitHub CLI tooling.
 
 ### 💻 Installation
 
 ```bash
-python -m venv venv
+python3 -m venv venv
 source venv/bin/activate  # or .\venv\Scripts\activate (Windows)
 pip install -r requirements.txt
 ```
@@ -121,10 +120,7 @@ Thanks a lot for your support! 💙
 <!-- LICENSE -->
 ### 📄 License
 
-This project is licensed under the **MIT License** 📜.
-You're free to use, modify, and distribute it — just remember to give credit 🤝.
-
-See the full license in [`LICENSE.txt`](https://en.wikipedia.org/wiki/MIT_License) for details.
+Add the license file that matches your intended distribution before publishing this repository.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -152,8 +148,6 @@ See the full license in [`LICENSE.txt`](https://en.wikipedia.org/wiki/MIT_Licens
 [stars-url]: https://github.com/nlabrazi/dev-tools/stargazers
 [issues-shield]: https://img.shields.io/github/issues/nlabrazi/dev-tools.svg?style=for-the-badge
 [issues-url]: https://github.com/nlabrazi/dev-tools/issues
-[license-shield]: https://img.shields.io/github/license/nlabrazi/dev-tools.svg?style=for-the-badge
-[license-url]: https://github.com/nlabrazi/dev-tools/blob/master/LICENSE.txt
 [linkedin-shield]: https://img.shields.io/badge/-LinkedIn-black.svg?style=for-the-badge&logo=linkedin&colorB=555
 [linkedin-url]: https://linkedin.com/in/nabil-labrazi
 [product-screenshot]: app/assets/images/screenshot.png
