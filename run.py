@@ -6,15 +6,10 @@ from utils.common import set_dry_run
 from utils.console import ask_yes_no
 from core.commit import auto_commit_all_repos
 from core.changelog import update_all_repos_interactive
+from core.config import DEFAULT_BASE_BRANCH, DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE, ROOT_DIRS
 import core.merge as merge
 import core.sync as sync
 import argparse
-import os
-
-ROOT_DIRS = [
-    os.path.expanduser("~/code/pers"),
-    os.path.expanduser("~/code/bricolage")
-]
 
 console = Console()
 
@@ -42,14 +37,14 @@ def main():
     print(f"\n[bold green]{figlet_format('Dev Tools', font='slant')}[/]")
 
     # --- STEP 1: AUTO-COMMIT ---
-    section_title("Auto-commit staging", "🔧")
+    section_title(f"Auto-commit {DEFAULT_HEAD_BRANCH}", "🔧")
     if ask_yes_no("Browse repos and run auto-commit ?", default="n"):
         auto_commit_all_repos(ROOT_DIRS)
 
     # --- STEP 2: MERGE ---
-    section_title("Merge to master", "🔁")
-    if ask_yes_no("Merge staging into master ?", default="n"):
-        merge.main()
+    section_title(f"Merge to {DEFAULT_BASE_BRANCH}", "🔁")
+    if ask_yes_no(f"Merge {DEFAULT_HEAD_BRANCH} into {DEFAULT_BASE_BRANCH} ?", default="n"):
+        merge.main(ROOT_DIRS)
 
     # --- STEP 3: CHANGELOG ---
     section_title("Update changelogs", "📝")
@@ -57,8 +52,9 @@ def main():
         update_all_repos_interactive(ROOT_DIRS)
 
     # --- STEP 4: SYNC MASTER ---
-    section_title("Sync master from origin", "⏳")
-    if ask_yes_no("Checkout master + pull origin/master on all repos ?", default="n"):
+    section_title(f"Sync {DEFAULT_BASE_BRANCH} from {DEFAULT_REMOTE}", "⏳")
+    sync_prompt = f"Checkout {DEFAULT_BASE_BRANCH} + pull {DEFAULT_REMOTE}/{DEFAULT_BASE_BRANCH} on all repos ?"
+    if ask_yes_no(sync_prompt, default="n"):
         sync.main(ROOT_DIRS)
 
     print(f"\n[bold cyan]{figlet_format('All Done!', font='slant')}[/]")

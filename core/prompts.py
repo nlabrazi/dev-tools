@@ -33,7 +33,7 @@ Staged diff:
 {diff}
 """
 
-PR_SYSTEM = """You are a senior engineer writing a Pull Request for merging staging into master.
+PR_SYSTEM = """You are a senior engineer writing a Pull Request for merging one release branch into another.
 
 Rules:
 - Output MUST be valid JSON only. No markdown fences, no extra text.

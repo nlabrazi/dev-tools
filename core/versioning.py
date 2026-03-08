@@ -1,7 +1,10 @@
 # core/versioning.py
 import re
 from dataclasses import dataclass
-from utils.common import run_command
+
+from core.config import DEFAULT_REMOTE
+from core.conventional_commits import determine_bump_from_messages
+from utils.common import run_command, run_command_checked
 
 
 SEMVER_RE = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
@@ -40,8 +43,9 @@ def get_last_semver_tag(repo_path: str) -> str | None:
     Return latest semver-like tag (vX.Y.Z) by version sort.
     """
     res = run_command(["git", "tag", "--list", "v*.*.*", "--sort=-v:refname"], cwd=repo_path)
-    tags = [(res.stdout or "").strip().splitlines()]
-    tags = tags[0] if tags else []
+    if res.returncode != 0:
+        return None
+    tags = (res.stdout or "").strip().splitlines()
     for t in tags:
         if parse_semver(t):
             return t
@@ -57,13 +61,11 @@ def determine_bump_from_commits(commit_subjects: str) -> str:
     - Else: patch
     """
     s = (commit_subjects or "").lower()
-    if "breaking change" in s or "!:" in s or "feat!:" in s or "fix!:" in s:
+    if "breaking change" in s:
         return "major"
-    if "\n- feat:" in "\n" + s or s.startswith("feat:"):
-        return "minor"
-    if "\n- fix:" in "\n" + s or "\n- perf:" in "\n" + s or s.startswith("fix:") or s.startswith("perf:"):
-        return "patch"
-    return "patch"
+
+    lines = [line.strip() for line in commit_subjects.splitlines() if line.strip()]
+    return determine_bump_from_messages(lines)
 
 
 def compute_next_version(repo_path: str, bump_kind: str, default_first: str = "v0.1.0") -> str:
@@ -89,5 +91,9 @@ def create_and_push_tag(repo_path: str, tag: str, message: str | None = None) ->
     Create annotated tag and push it.
     """
     msg = message or f"Release {tag}"
-    run_command(["git", "tag", "-a", tag, "-m", msg], cwd=repo_path)
-    run_command(["git", "push", "origin", tag], cwd=repo_path)
+    run_command_checked(["git", "tag", "-a", tag, "-m", msg], cwd=repo_path, context=f"create tag {tag}")
+    run_command_checked(
+        ["git", "push", DEFAULT_REMOTE, tag],
+        cwd=repo_path,
+        context=f"push tag {tag} to {DEFAULT_REMOTE}",
+    )

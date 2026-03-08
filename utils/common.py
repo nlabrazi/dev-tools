@@ -1,5 +1,7 @@
 # utils/common.py
 
+import os
+from pathlib import Path
 import subprocess
 from typing import List, Optional, Union
 
@@ -15,8 +17,12 @@ _SAFE_PREFIXES: list[list[str]] = [
     ["git", "branch"],
     ["git", "remote"],
     ["git", "show"],
+    ["git", "show-ref"],
+    ["git", "symbolic-ref"],
+    ["git", "rev-list"],
     ["git", "ls-files"],
     ["git", "config"],
+    ["git", "tag"],
 ]
 
 # Commands that mutate state (must be blocked in dry-run)
@@ -30,7 +36,8 @@ _BLOCK_PREFIXES: list[list[str]] = [
     ["git", "checkout"],
     ["git", "switch"],
     ["git", "restore"],
-    ["git", "tag"],
+    ["git", "tag", "-a"],
+    ["git", "tag", "--annotate"],
     ["gh"], # GitHub CLI actions should not run in dry-run
 ]
 
@@ -40,6 +47,10 @@ _DRY_RUN_BLOCKED_RC = 99
 def set_dry_run(state: bool = True) -> None:
     global DRY_RUN
     DRY_RUN = state
+
+
+def is_dry_run() -> bool:
+    return DRY_RUN
 
 
 def _is_prefix(command: list[str], prefix: list[str]) -> bool:
@@ -109,3 +120,66 @@ def run_command(
 
     # If silent, we simply do not print. Caller can decide.
     return result
+
+
+def run_command_checked(
+    command: Union[List[str], str],
+    cwd: Optional[str] = None,
+    silent: bool = False,
+    text: bool = True,
+    context: Optional[str] = None,
+) -> subprocess.CompletedProcess:
+    result = run_command(command, cwd=cwd, silent=silent, text=text)
+    if result.returncode == 0:
+        return result
+
+    details = ((result.stderr or "").strip() or (result.stdout or "").strip() or f"exit code {result.returncode}")
+    if isinstance(command, str):
+        command_label = command
+    else:
+        command_label = " ".join(command)
+    action = context or command_label
+    raise RuntimeError(f"{action} failed: {details}")
+
+
+def env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= minimum else default
+
+
+def trim_text_middle(text: str, max_chars: int) -> str:
+    text = text or ""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+
+    marker = "\n\n... [truncated for model context] ...\n\n"
+    if max_chars <= len(marker) + 50:
+        return text[:max_chars]
+
+    head = int(max_chars * 0.7)
+    tail = max_chars - head - len(marker)
+    if tail < 0:
+        tail = 0
+    return text[:head] + marker + text[-tail:]
+
+
+def prepend_text_file(path: str, prefix: str, encoding: str = "utf-8") -> bool:
+    if DRY_RUN:
+        print(f"🌐 [DRY-RUN] Blocked file write: prepend content to {path}")
+        return False
+
+    file_path = Path(path)
+    existing = file_path.read_text(encoding=encoding) if file_path.exists() else ""
+    if existing:
+        separator = "" if prefix.endswith("\n") else "\n"
+        new_content = f"{prefix}{separator}{existing}"
+    else:
+        new_content = prefix
+    file_path.write_text(new_content, encoding=encoding)
+    return True
