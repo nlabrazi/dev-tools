@@ -13,7 +13,7 @@ def _resolve_root_dirs() -> list[str]:
     return [
         os.path.expanduser("~/code/pers"),
         os.path.expanduser("~/code/bricolage"),
-        os.path.expanduser("/mnt/d/Projects"),
+        os.path.expanduser("/mnt/d/Unity/Projects"),
     ]
 
 
