@@ -1,6 +1,8 @@
 import os
+import re
 from datetime import datetime
 from collections import defaultdict
+from pathlib import Path
 
 from rich import print
 from rich.panel import Panel
@@ -9,10 +11,16 @@ from rich.console import Console
 from core.config import CHANGELOG_FILENAME, DEFAULT_REMOTE, ROOT_DIRS
 from core.conventional_commits import parse_conventional_commit
 from core.repositories import iter_git_repositories
-from utils.common import is_dry_run, prepend_text_file, run_command, run_command_checked
+from core.versioning import compute_next_version_from_messages, get_last_semver_tag
+from utils.common import is_dry_run, run_command, run_command_checked
 from utils.console import ask_yes_no
 
 console = Console()
+CHANGELOG_TITLE = "# 📅 CHANGELOG"
+CHANGELOG_SECTION_RE = re.compile(
+    r"^## \[(?P<label>[^\]]+)\](?: - (?P<date>\d{4}-\d{2}-\d{2}))?\s*$",
+    re.MULTILINE,
+)
 
 EMOJI_MAP = {
     "feat": "✨",
@@ -49,8 +57,36 @@ def get_staged_files(path: str) -> list[str]:
 
 
 def get_last_tag(path: str) -> str | None:
-    tags = run_git_command(path, ["tag", "--sort=-creatordate"]).splitlines()
-    return tags[0] if tags else None
+    return get_last_semver_tag(path)
+
+
+def read_changelog(repo_path: str) -> str:
+    changelog_path = Path(repo_path) / CHANGELOG_FILENAME
+    if not changelog_path.exists():
+        return ""
+    return changelog_path.read_text(encoding="utf-8")
+
+
+def write_changelog(repo_path: str, content: str) -> None:
+    changelog_path = Path(repo_path) / CHANGELOG_FILENAME
+    changelog_path.write_text(content, encoding="utf-8")
+
+
+def get_changelog_file_status(path: str) -> list[str]:
+    output = run_git_command(path, ["status", "--porcelain", "--", CHANGELOG_FILENAME])
+    return [line.rstrip() for line in output.splitlines() if line.strip()]
+
+
+def changelog_has_any_changes(path: str) -> bool:
+    return bool(get_changelog_file_status(path))
+
+
+def unstage_changelog(path: str) -> None:
+    run_command_checked(
+        ["git", "restore", "--staged", "--", CHANGELOG_FILENAME],
+        cwd=path,
+        context=f"unstage {CHANGELOG_FILENAME}",
+    )
 
 
 def get_commits_since_tag(path: str, last_tag: str | None = None) -> list[str]:
@@ -77,9 +113,78 @@ def classify_commits(commits: list[str]) -> tuple[dict[str, list[str]], list[str
     return categorized, uncategorized
 
 
+def has_changelog_section(content: str, version_label: str) -> bool:
+    return any(match.group("label") == version_label for match in CHANGELOG_SECTION_RE.finditer(content or ""))
+
+
+def split_changelog_sections(content: str) -> tuple[str, list[tuple[str, str]]]:
+    normalized = (content or "").replace("\r\n", "\n")
+    matches = list(CHANGELOG_SECTION_RE.finditer(normalized))
+    if not matches:
+        return normalized, []
+
+    prefix = normalized[: matches[0].start()]
+    sections: list[tuple[str, str]] = []
+    for index, match in enumerate(matches):
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(normalized)
+        label = match.group("label").strip()
+        section_text = normalized[start:end].strip()
+        sections.append((label, section_text))
+
+    return prefix, sections
+
+
+def compose_changelog(prefix: str, sections: list[tuple[str, str]]) -> str:
+    prefix_block = (prefix or "").strip()
+    if not prefix_block:
+        prefix_block = CHANGELOG_TITLE
+    elif CHANGELOG_TITLE not in prefix_block:
+        prefix_block = f"{CHANGELOG_TITLE}\n\n{prefix_block}"
+
+    parts = [prefix_block]
+    for _, section_text in sections:
+        cleaned = section_text.strip()
+        if cleaned:
+            parts.append(cleaned)
+
+    return "\n\n".join(parts).rstrip() + "\n"
+
+
+def upsert_changelog_section(existing_content: str, section_content: str, version_label: str) -> str:
+    prefix, sections = split_changelog_sections(existing_content)
+    remaining_sections = [(label, text) for label, text in sections if label != version_label]
+
+    insert_index = 0
+    if version_label != "Unreleased":
+        for index, (label, _) in enumerate(remaining_sections):
+            if label == "Unreleased":
+                insert_index = index + 1
+                break
+
+    remaining_sections.insert(insert_index, (version_label, section_content.strip()))
+    return compose_changelog(prefix, remaining_sections)
+
+
+def resolve_changelog_version_label(repo_path: str, commits: list[str], existing_content: str) -> str:
+    if has_changelog_section(existing_content, "Unreleased"):
+        return "Unreleased"
+
+    last_tag = get_last_tag(repo_path)
+    if not last_tag:
+        return "Unreleased"
+
+    return compute_next_version_from_messages(repo_path, commits, default_first="v0.1.0")
+
+
 def generate_changelog(commits: list[str], version_label: str) -> str:
     categorized, uncategorized = classify_commits(commits)
-    block = [f"## [{version_label}] - {datetime.now().strftime('%Y-%m-%d')}", ""]
+    if version_label == "Unreleased":
+        header = "## [Unreleased]"
+    else:
+        header = f"## [{version_label}] - {datetime.now().strftime('%Y-%m-%d')}"
+
+    block = [header, ""]
 
     for commit_type in EMOJI_MAP:
         messages = categorized.get(commit_type, [])
@@ -97,12 +202,19 @@ def generate_changelog(commits: list[str], version_label: str) -> str:
             block.append(f"- {msg}")
         block.append("")
 
-    return "\n".join(block)
+    return "\n".join(block).rstrip() + "\n"
 
 
-def update_changelog(repo_path: str, changelog_content: str) -> bool:
-    changelog_path = os.path.join(repo_path, CHANGELOG_FILENAME)
-    return prepend_text_file(changelog_path, changelog_content)
+def update_changelog(repo_path: str, changelog_content: str, version_label: str) -> str:
+    existing_content = read_changelog(repo_path)
+    updated_content = upsert_changelog_section(existing_content, changelog_content, version_label)
+    if updated_content == existing_content:
+        return "noop"
+    if is_dry_run():
+        return "dry-run"
+
+    write_changelog(repo_path, updated_content)
+    return "updated"
 
 
 def commit_and_push_changelog(repo_path: str) -> bool:
@@ -118,20 +230,42 @@ def commit_and_push_changelog(repo_path: str) -> bool:
         )
         return False
 
+    staged_files = set(get_staged_files(repo_path))
+    extras = staged_files - {CHANGELOG_FILENAME}
+    if extras:
+        extras_list = ", ".join(sorted(extras))
+        print(f"⚠️ Other staged files detected ({extras_list}). Commit aborted to avoid bundling unrelated changes.")
+        return False
+
+    changelog_already_staged = CHANGELOG_FILENAME in staged_files
+    if not changelog_already_staged and not changelog_has_any_changes(repo_path):
+        print("⚪ No changelog changes to commit.")
+        return False
+
     with console.status("[bold green]Committing and pushing changelog...", spinner="dots"):
+        staged_by_us = False
+        committed = False
         try:
-            run_command_checked(
-                ["git", "add", "--", CHANGELOG_FILENAME],
-                cwd=repo_path,
-                context=f"stage {CHANGELOG_FILENAME}",
-            )
-            staged_files = set(get_staged_files(repo_path))
-            if not staged_files:
-                print("⚪ No changelog changes staged.")
-                return False
-            if staged_files != {CHANGELOG_FILENAME}:
-                extras = ", ".join(sorted(staged_files - {CHANGELOG_FILENAME}))
-                print(f"⚠️ Other staged files detected ({extras}). Commit aborted to avoid bundling unrelated changes.")
+            if not changelog_already_staged:
+                run_command_checked(
+                    ["git", "add", "--", CHANGELOG_FILENAME],
+                    cwd=repo_path,
+                    context=f"stage {CHANGELOG_FILENAME}",
+                )
+                staged_by_us = True
+
+            staged_after = set(get_staged_files(repo_path))
+            if staged_after != {CHANGELOG_FILENAME}:
+                extras_after = ", ".join(sorted(staged_after - {CHANGELOG_FILENAME}))
+                if staged_by_us:
+                    unstage_changelog(repo_path)
+                if staged_after:
+                    print(
+                        f"⚠️ Other staged files detected ({extras_after}). "
+                        "Commit aborted to avoid bundling unrelated changes."
+                    )
+                else:
+                    print("⚪ No changelog changes staged.")
                 return False
 
             message = f"docs: update changelog ({datetime.now().strftime('%Y-%m-%d %H:%M')})"
@@ -140,12 +274,18 @@ def commit_and_push_changelog(repo_path: str) -> bool:
                 cwd=repo_path,
                 context="commit changelog",
             )
+            committed = True
             run_command_checked(
                 ["git", "push", DEFAULT_REMOTE, branch],
                 cwd=repo_path,
                 context=f"push changelog to {DEFAULT_REMOTE}/{branch}",
             )
         except Exception as exc:
+            if staged_by_us and not committed:
+                try:
+                    unstage_changelog(repo_path)
+                except Exception:
+                    pass
             print(f"❌ {exc}")
             return False
 
@@ -167,18 +307,22 @@ def update_all_repos_interactive(root_dirs: list[str]) -> None:
             found_repos = True
 
             last_tag = get_last_tag(repo_path)
+            existing_changelog = read_changelog(repo_path)
             commits = get_commits_since_tag(repo_path, last_tag)
             if not commits:
                 print(f"⚪ {repo}: No new commits to update changelog")
                 continue
 
-            version_label = last_tag if last_tag else "Unreleased"
+            version_label = resolve_changelog_version_label(repo_path, commits, existing_changelog)
             changelog_preview = generate_changelog(commits, version_label)
 
             repo_panel = Panel.fit(
                 changelog_preview,
                 title=f"[bold green]{repo}[/]",
-                subtitle=f"[bold blue]Last Tag: {last_tag if last_tag else 'None'}[/]",
+                subtitle=(
+                    f"[bold blue]Last Release: {last_tag if last_tag else 'None'}"
+                    f" | Target: {version_label}[/]"
+                ),
                 border_style="cyan",
             )
             console.print(repo_panel)
@@ -187,13 +331,15 @@ def update_all_repos_interactive(root_dirs: list[str]) -> None:
                 print("⏹️ Skipped changelog.")
                 continue
 
-            if update_changelog(repo_path, changelog_preview):
+            update_status = update_changelog(repo_path, changelog_preview, version_label)
+            if update_status == "updated":
                 print(f"✅ Changelog updated for {repo}")
+            elif update_status == "dry-run":
+                print(f"🧪 Dry-run: would update {CHANGELOG_FILENAME} for {repo}")
+            elif update_status == "noop":
+                print(f"⚪ {repo}: {CHANGELOG_FILENAME} already up to date")
             else:
-                if is_dry_run():
-                    print(f"🧪 Dry-run: would update {CHANGELOG_FILENAME} for {repo}")
-                else:
-                    print(f"❌ Failed to update {CHANGELOG_FILENAME} for {repo}")
+                print(f"❌ Failed to update {CHANGELOG_FILENAME} for {repo}")
 
             if ask_yes_no("📤 Do you want to commit and push the changelog ?", default="n"):
                 commit_and_push_changelog(repo_path)
