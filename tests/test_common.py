@@ -5,8 +5,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from utils.common import (
+    CommandTimedOutError,
     DryRunBlockedError,
     is_dry_run,
+    is_timeout_result,
     prepend_text_file,
     run_command,
     run_command_checked,
@@ -49,6 +51,7 @@ class DryRunTests(unittest.TestCase):
             cwd="/tmp/repo",
             capture_output=True,
             text=True,
+            timeout=None,
         )
 
     def test_run_command_allows_fetch_and_readonly_gh_commands_in_dry_run(self) -> None:
@@ -81,6 +84,21 @@ class DryRunTests(unittest.TestCase):
 
         with patch("builtins.print"), self.assertRaises(DryRunBlockedError):
             run_command_checked(["git", "commit", "-m", "test"], cwd="/tmp/repo", context="commit changes")
+
+    def test_run_command_returns_timeout_result_when_subprocess_times_out(self) -> None:
+        timeout_error = subprocess.TimeoutExpired(cmd=["git", "status"], timeout=5)
+
+        with patch("utils.common.subprocess.run", side_effect=timeout_error):
+            result = run_command(["git", "status"], cwd="/tmp/repo", timeout=5)
+
+        self.assertTrue(is_timeout_result(result))
+        self.assertIn("command timed out after 5s", result.stderr)
+
+    def test_run_command_checked_raises_command_timeout_error(self) -> None:
+        timeout_error = subprocess.TimeoutExpired(cmd=["git", "status"], timeout=3)
+
+        with patch("utils.common.subprocess.run", side_effect=timeout_error), self.assertRaises(CommandTimedOutError):
+            run_command_checked(["git", "status"], cwd="/tmp/repo", context="git status", timeout=3)
 
     def test_prepend_text_file_is_blocked_in_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

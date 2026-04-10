@@ -19,7 +19,7 @@ from core.changelog import (
 class ChangelogTests(unittest.TestCase):
     def test_get_commits_since_tag_filters_maintenance_noise(self) -> None:
         with patch(
-            "core.changelog.run_git_command",
+            "core.changelog.git_output",
             return_value="\n".join(
                 [
                     "feat(api): add release endpoint",
@@ -28,7 +28,7 @@ class ChangelogTests(unittest.TestCase):
                     "Initial commit",
                 ]
             ),
-        ) as run_git_command:
+        ) as git_output:
             commits = get_commits_since_tag("/tmp/repo", "v1.2.3")
 
         self.assertEqual(
@@ -38,7 +38,7 @@ class ChangelogTests(unittest.TestCase):
                 "fix(worker): guard empty jobs",
             ],
         )
-        run_git_command.assert_called_once_with(
+        git_output.assert_called_once_with(
             "/tmp/repo",
             ["log", "v1.2.3..HEAD", "--pretty=format:%s", "--no-merges"],
         )
@@ -159,11 +159,11 @@ class ChangelogTests(unittest.TestCase):
         with patch("core.changelog.get_current_branch", return_value="staging"), patch(
             "core.changelog.get_staged_files",
             return_value=["README.md"],
-        ), patch("core.changelog.run_command_checked") as run_command_checked, patch("core.changelog.print"):
+        ), patch("core.changelog.git_command_checked") as git_command_checked, patch("core.changelog.print"):
             result = commit_and_push_changelog("/tmp/repo")
 
         self.assertFalse(result)
-        run_command_checked.assert_not_called()
+        git_command_checked.assert_not_called()
 
     def test_commit_and_push_changelog_stages_file_only_when_needed(self) -> None:
         with patch("core.changelog.get_current_branch", return_value="staging"), patch(
@@ -172,7 +172,7 @@ class ChangelogTests(unittest.TestCase):
         ), patch(
             "core.changelog.changelog_has_any_changes",
             return_value=True,
-        ), patch("core.changelog.run_command_checked") as run_command_checked, patch(
+        ), patch("core.changelog.git_command_checked") as git_command_checked, patch(
             "core.changelog.datetime"
         ) as mocked_datetime, patch("core.changelog.print"):
             mocked_datetime.now.return_value.strftime.return_value = "2026-04-10 12:34"
@@ -181,21 +181,21 @@ class ChangelogTests(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertEqual(
-            run_command_checked.call_args_list,
+            git_command_checked.call_args_list,
             [
                 call(
-                    ["git", "add", "--", "CHANGELOG.md"],
-                    cwd="/tmp/repo",
+                    "/tmp/repo",
+                    ["add", "--", "CHANGELOG.md"],
                     context="stage CHANGELOG.md",
                 ),
                 call(
-                    ["git", "commit", "-m", "docs: update changelog (2026-04-10 12:34)"],
-                    cwd="/tmp/repo",
+                    "/tmp/repo",
+                    ["commit", "-m", "docs: update changelog (2026-04-10 12:34)"],
                     context="commit changelog",
                 ),
                 call(
-                    ["git", "push", "origin", "staging"],
-                    cwd="/tmp/repo",
+                    "/tmp/repo",
+                    ["push", "origin", "staging"],
                     context="push changelog to origin/staging",
                 ),
             ],
@@ -206,8 +206,8 @@ class ChangelogTests(unittest.TestCase):
             "core.changelog.get_staged_files",
             return_value=["CHANGELOG.md"],
         ), patch(
-            "core.changelog.run_command_checked"
-        ) as run_command_checked, patch(
+            "core.changelog.git_command_checked"
+        ) as git_command_checked, patch(
             "core.changelog.datetime"
         ) as mocked_datetime, patch("core.changelog.print"):
             mocked_datetime.now.return_value.strftime.return_value = "2026-04-10 12:34"
@@ -216,16 +216,16 @@ class ChangelogTests(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertEqual(
-            run_command_checked.call_args_list,
+            git_command_checked.call_args_list,
             [
                 call(
-                    ["git", "commit", "-m", "docs: update changelog (2026-04-10 12:34)"],
-                    cwd="/tmp/repo",
+                    "/tmp/repo",
+                    ["commit", "-m", "docs: update changelog (2026-04-10 12:34)"],
                     context="commit changelog",
                 ),
                 call(
-                    ["git", "push", "origin", "staging"],
-                    cwd="/tmp/repo",
+                    "/tmp/repo",
+                    ["push", "origin", "staging"],
                     context="push changelog to origin/staging",
                 ),
             ],
@@ -239,7 +239,7 @@ class ChangelogTests(unittest.TestCase):
             "core.changelog.changelog_has_any_changes",
             return_value=True,
         ), patch(
-            "core.changelog.run_command_checked",
+            "core.changelog.git_command_checked",
             side_effect=[None, RuntimeError("commit failed")],
         ), patch("core.changelog.unstage_changelog") as unstage_changelog, patch("core.changelog.print"):
             result = commit_and_push_changelog("/tmp/repo")
@@ -251,11 +251,11 @@ class ChangelogTests(unittest.TestCase):
         with patch("core.changelog.get_current_branch", return_value="staging"), patch(
             "core.changelog.is_dry_run",
             return_value=True,
-        ), patch("core.changelog.run_command_checked") as run_command_checked, patch("core.changelog.print"):
+        ), patch("core.changelog.git_command_checked") as git_command_checked, patch("core.changelog.print"):
             result = commit_and_push_changelog("/tmp/repo")
 
         self.assertFalse(result)
-        run_command_checked.assert_not_called()
+        git_command_checked.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 import unittest
+import subprocess
 from unittest.mock import patch
 
 from core.merge import create_and_merge_pr
@@ -7,6 +8,9 @@ from core.merge import create_and_merge_pr
 class MergeDryRunTests(unittest.TestCase):
     def test_create_and_merge_pr_dry_run_skips_pr_creation(self) -> None:
         with patch("core.merge.ensure_clean_worktree"), patch(
+            "core.merge.resolve_merge_base_branch",
+            return_value=("main", "resolved from origin/HEAD"),
+        ), patch(
             "core.merge.get_current_branch",
             return_value="staging",
         ), patch(
@@ -45,10 +49,70 @@ class MergeDryRunTests(unittest.TestCase):
         ), patch(
             "core.merge.is_dry_run",
             return_value=True,
+        ), patch(
+            "core.merge.resolve_merge_base_branch",
+            return_value=("main", "resolved from origin/HEAD"),
         ), patch("core.merge.merge_pr_with_retry") as merge_pr_with_retry, patch("core.merge.print"):
             create_and_merge_pr("/tmp/repo", "repo")
 
         merge_pr_with_retry.assert_not_called()
+
+    def test_create_and_merge_pr_uses_resolved_base_branch_for_pr_creation(self) -> None:
+        create_result = subprocess.CompletedProcess(
+            args=["gh", "pr", "create"],
+            returncode=0,
+            stdout="https://github.com/example/repo/pull/42\n",
+            stderr="",
+        )
+        with patch("core.merge.ensure_clean_worktree"), patch(
+            "core.merge.resolve_merge_base_branch",
+            return_value=("main", "resolved from origin/HEAD"),
+        ), patch(
+            "core.merge.get_current_branch",
+            return_value="staging",
+        ), patch(
+            "core.merge.get_commit_summary",
+            return_value="- feat(api): ship feature",
+        ), patch(
+            "core.merge.generate_pr_text_with_ollama",
+            return_value=("Test PR", "Body"),
+        ), patch(
+            "core.merge.existing_pr_number",
+            return_value="",
+        ), patch(
+            "core.merge.ask_yes_no",
+            return_value=True,
+        ), patch(
+            "core.merge.is_dry_run",
+            return_value=False,
+        ), patch(
+            "core.merge.run_command",
+            return_value=create_result,
+        ) as run_command, patch(
+            "core.merge.get_pr_number_from_url",
+            return_value="42",
+        ), patch(
+            "core.merge.merge_pr_with_retry",
+            return_value=False,
+        ), patch("core.merge.print"), patch("core.merge.console.status"):
+            create_and_merge_pr("/tmp/repo", "repo")
+
+        run_command.assert_called_once_with(
+            [
+                "gh",
+                "pr",
+                "create",
+                "--base",
+                "main",
+                "--head",
+                "staging",
+                "--title",
+                "Test PR",
+                "--body",
+                "Body",
+            ],
+            cwd="/tmp/repo",
+        )
 
 
 if __name__ == "__main__":

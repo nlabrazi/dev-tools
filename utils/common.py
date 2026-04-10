@@ -6,6 +6,8 @@ import subprocess
 from typing import List, Optional, Union
 
 DRY_RUN = False
+_TIMEOUT_RESULT_RC = 124
+_TIMEOUT_MARKER = "COMMAND_TIMEOUT:"
 
 # Commands that are safe to execute even in dry-run (read-only)
 _SAFE_PREFIXES: list[list[str]] = [
@@ -59,6 +61,18 @@ class DryRunBlockedError(RuntimeError):
         super().__init__(f"{action} skipped in dry-run: would execute `{command_label}`")
 
 
+class CommandTimedOutError(RuntimeError):
+    def __init__(self, action: str, command: Union[List[str], str], details: str) -> None:
+        if isinstance(command, str):
+            command_label = command
+        else:
+            command_label = " ".join(command)
+        self.action = action
+        self.command = command_label
+        self.details = details
+        super().__init__(f"{action} timed out: {details}")
+
+
 def set_dry_run(state: bool = True) -> None:
     global DRY_RUN
     DRY_RUN = state
@@ -70,6 +84,15 @@ def is_dry_run() -> bool:
 
 def is_dry_run_result(result: subprocess.CompletedProcess) -> bool:
     return result.returncode == _DRY_RUN_BLOCKED_RC
+
+
+def is_timeout_result(result: subprocess.CompletedProcess) -> bool:
+    stderr = result.stderr or ""
+    if result.returncode != _TIMEOUT_RESULT_RC:
+        return False
+    if isinstance(stderr, bytes):
+        return stderr.startswith(bytes(_TIMEOUT_MARKER, encoding="utf-8"))
+    return isinstance(stderr, str) and stderr.startswith(_TIMEOUT_MARKER)
 
 
 def _is_prefix(command: list[str], prefix: list[str]) -> bool:
@@ -86,11 +109,57 @@ def _is_blocked(command: list[str]) -> bool:
     return any(_is_prefix(command, p) for p in _BLOCK_PREFIXES)
 
 
+def _normalize_output(value: object, text: bool) -> str | bytes:
+    if value is None:
+        return "" if text else b""
+    if text:
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return str(value)
+    if isinstance(value, str):
+        return value.encode("utf-8", errors="replace")
+    if isinstance(value, bytes):
+        return value
+    return bytes(str(value), encoding="utf-8", errors="replace")
+
+
+def _timeout_result(
+    command_list: list[str],
+    error: subprocess.TimeoutExpired,
+    text: bool,
+    timeout: float | None,
+) -> subprocess.CompletedProcess:
+    timeout_label = timeout if timeout is not None else "unknown"
+    stdout = _normalize_output(error.stdout, text)
+    stderr = _normalize_output(error.stderr, text)
+    details = f"{_TIMEOUT_MARKER} command timed out after {timeout_label}s"
+    if text:
+        stderr_text = str(stderr)
+        stderr_value = details if not stderr_text else f"{details}\n{stderr_text}"
+        return subprocess.CompletedProcess(
+            args=command_list,
+            returncode=_TIMEOUT_RESULT_RC,
+            stdout=str(stdout),
+            stderr=stderr_value,
+        )
+
+    stderr_bytes = stderr if isinstance(stderr, bytes) else bytes(str(stderr), encoding="utf-8", errors="replace")
+    details_bytes = bytes(details, encoding="utf-8", errors="replace")
+    stderr_value = details_bytes if not stderr_bytes else details_bytes + b"\n" + stderr_bytes
+    return subprocess.CompletedProcess(
+        args=command_list,
+        returncode=_TIMEOUT_RESULT_RC,
+        stdout=stdout if isinstance(stdout, bytes) else bytes(str(stdout), encoding="utf-8", errors="replace"),
+        stderr=stderr_value,
+    )
+
+
 def run_command(
     command: Union[List[str], str],
     cwd: Optional[str] = None,
     silent: bool = False,
     text: bool = True,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess:
     """
     Execute a command and return a CompletedProcess with stdout/stderr always available.
@@ -112,12 +181,16 @@ def run_command(
         if _is_safe_readonly(command_list) and not _is_blocked(command_list):
             if not silent:
                 print(f"🧪 [DRY-RUN/READ] Executing: {cmd_str} in {cwd}")
-            return subprocess.run(
-                command_list,
-                cwd=cwd,
-                capture_output=True,
-                text=text,
-            )
+            try:
+                return subprocess.run(
+                    command_list,
+                    cwd=cwd,
+                    capture_output=True,
+                    text=text,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as error:
+                return _timeout_result(command_list, error, text=text, timeout=timeout)
 
         # Block mutating commands: DO NOT pretend success
         if not silent:
@@ -130,12 +203,16 @@ def run_command(
         )
 
     # Normal execution: ALWAYS capture output so callers can debug on failure
-    result = subprocess.run(
-        command_list,
-        cwd=cwd,
-        capture_output=True,
-        text=text,
-    )
+    try:
+        result = subprocess.run(
+            command_list,
+            cwd=cwd,
+            capture_output=True,
+            text=text,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        return _timeout_result(command_list, error, text=text, timeout=timeout)
 
     # If silent, we simply do not print. Caller can decide.
     return result
@@ -147,8 +224,9 @@ def run_command_checked(
     silent: bool = False,
     text: bool = True,
     context: Optional[str] = None,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess:
-    result = run_command(command, cwd=cwd, silent=silent, text=text)
+    result = run_command(command, cwd=cwd, silent=silent, text=text, timeout=timeout)
     if result.returncode == 0:
         return result
 
@@ -159,6 +237,20 @@ def run_command_checked(
             command_label = " ".join(command)
         action = context or command_label
         raise DryRunBlockedError(action, command)
+
+    if is_timeout_result(result):
+        if isinstance(command, str):
+            command_label = command
+        else:
+            command_label = " ".join(command)
+        action = context or command_label
+        raw_stderr = result.stderr or ""
+        if isinstance(raw_stderr, bytes):
+            stderr_text = raw_stderr.decode("utf-8", errors="replace")
+        else:
+            stderr_text = raw_stderr
+        details = stderr_text.replace(_TIMEOUT_MARKER, "", 1).strip() or "command timed out"
+        raise CommandTimedOutError(action, command, details)
 
     details = ((result.stderr or "").strip() or (result.stdout or "").strip() or f"exit code {result.returncode}")
     if isinstance(command, str):

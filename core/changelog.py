@@ -12,7 +12,8 @@ from core.config import CHANGELOG_FILENAME, DEFAULT_REMOTE, ROOT_DIRS
 from core.conventional_commits import parse_conventional_commit
 from core.repositories import iter_git_repositories
 from core.versioning import compute_next_version_from_messages, get_last_semver_tag
-from utils.common import is_dry_run, run_command, run_command_checked
+from utils.common import is_dry_run
+from utils.git import git_command_checked, git_output
 from utils.console import ask_yes_no
 
 console = Console()
@@ -39,20 +40,12 @@ EXCLUDED_KEYWORDS = [
     "changelog", "readme", "merge", "auto commit", "autocommit", "bump", "version", "initial commit"
 ]
 
-
-def run_git_command(path: str, args: list[str]) -> str:
-    result = run_command(["git"] + args, cwd=path, silent=True)
-    if result.returncode != 0:
-        return ""
-    return (result.stdout or "").strip()
-
-
 def get_current_branch(path: str) -> str:
-    return run_git_command(path, ["branch", "--show-current"])
+    return git_output(path, ["branch", "--show-current"])
 
 
 def get_staged_files(path: str) -> list[str]:
-    output = run_git_command(path, ["diff", "--cached", "--name-only"])
+    output = git_output(path, ["diff", "--cached", "--name-only"])
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
@@ -73,7 +66,7 @@ def write_changelog(repo_path: str, content: str) -> None:
 
 
 def get_changelog_file_status(path: str) -> list[str]:
-    output = run_git_command(path, ["status", "--porcelain", "--", CHANGELOG_FILENAME])
+    output = git_output(path, ["status", "--porcelain", "--", CHANGELOG_FILENAME])
     return [line.rstrip() for line in output.splitlines() if line.strip()]
 
 
@@ -82,16 +75,16 @@ def changelog_has_any_changes(path: str) -> bool:
 
 
 def unstage_changelog(path: str) -> None:
-    run_command_checked(
-        ["git", "restore", "--staged", "--", CHANGELOG_FILENAME],
-        cwd=path,
+    git_command_checked(
+        path,
+        ["restore", "--staged", "--", CHANGELOG_FILENAME],
         context=f"unstage {CHANGELOG_FILENAME}",
     )
 
 
 def get_commits_since_tag(path: str, last_tag: str | None = None) -> list[str]:
     range_spec = f"{last_tag}..HEAD" if last_tag else "HEAD"
-    log_output = run_git_command(path, ["log", range_spec, "--pretty=format:%s", "--no-merges"])
+    log_output = git_output(path, ["log", range_spec, "--pretty=format:%s", "--no-merges"])
     commits = log_output.splitlines()
     return [
         commit for commit in commits
@@ -247,9 +240,9 @@ def commit_and_push_changelog(repo_path: str) -> bool:
         committed = False
         try:
             if not changelog_already_staged:
-                run_command_checked(
-                    ["git", "add", "--", CHANGELOG_FILENAME],
-                    cwd=repo_path,
+                git_command_checked(
+                    repo_path,
+                    ["add", "--", CHANGELOG_FILENAME],
                     context=f"stage {CHANGELOG_FILENAME}",
                 )
                 staged_by_us = True
@@ -269,15 +262,15 @@ def commit_and_push_changelog(repo_path: str) -> bool:
                 return False
 
             message = f"docs: update changelog ({datetime.now().strftime('%Y-%m-%d %H:%M')})"
-            run_command_checked(
-                ["git", "commit", "-m", message],
-                cwd=repo_path,
+            git_command_checked(
+                repo_path,
+                ["commit", "-m", message],
                 context="commit changelog",
             )
             committed = True
-            run_command_checked(
-                ["git", "push", DEFAULT_REMOTE, branch],
-                cwd=repo_path,
+            git_command_checked(
+                repo_path,
+                ["push", DEFAULT_REMOTE, branch],
                 context=f"push changelog to {DEFAULT_REMOTE}/{branch}",
             )
         except Exception as exc:

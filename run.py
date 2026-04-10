@@ -6,7 +6,7 @@ from utils.common import set_dry_run
 from utils.console import ask_yes_no
 from core.commit import auto_commit_all_repos
 from core.changelog import update_all_repos_interactive
-from core.config import DEFAULT_BASE_BRANCH, DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE, ROOT_DIRS
+from core.config import DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE, ROOT_DIRS, describe_base_branch_strategy
 import core.merge as merge
 import core.sync as sync
 import argparse
@@ -42,8 +42,12 @@ def main():
         auto_commit_all_repos(ROOT_DIRS)
 
     # --- STEP 2: MERGE ---
-    section_title(f"Merge to {DEFAULT_BASE_BRANCH}", "🔁")
-    if ask_yes_no(f"Merge {DEFAULT_HEAD_BRANCH} into {DEFAULT_BASE_BRANCH} ?", default="n"):
+    section_title("Merge Into Base Branches", "🔁")
+    merge_prompt = (
+        f"Merge {DEFAULT_HEAD_BRANCH} into each repo base branch ? "
+        f"Strategy: {describe_base_branch_strategy(DEFAULT_REMOTE)}."
+    )
+    if ask_yes_no(merge_prompt, default="n"):
         merge.main(ROOT_DIRS)
 
     # --- STEP 3: CHANGELOG ---
@@ -51,9 +55,9 @@ def main():
     if ask_yes_no("Update changelogs ?", default="n"):
         update_all_repos_interactive(ROOT_DIRS)
 
-    # --- STEP 4: SYNC MASTER ---
-    section_title(f"Sync {DEFAULT_BASE_BRANCH} from {DEFAULT_REMOTE}", "⏳")
-    sync_prompt = f"Checkout {DEFAULT_BASE_BRANCH} + pull {DEFAULT_REMOTE}/{DEFAULT_BASE_BRANCH} on all repos ?"
+    # --- STEP 4: SYNC BASE BRANCHES ---
+    section_title("Sync Base Branches", "⏳")
+    sync_prompt = sync.describe_sync_plan()
     if ask_yes_no(sync_prompt, default="n"):
         sync.main(ROOT_DIRS)
 
