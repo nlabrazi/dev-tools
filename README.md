@@ -1,94 +1,122 @@
-# Dev Tools
+<a name="readme-top"></a>
 
-Outil Python pour automatiser des workflows Git locaux sur plusieurs repositories.
+<!-- PROJECT SHIELDS -->
+[![Contributors][contributors-shield]][contributors-url]
+[![Forks][forks-shield]][forks-url]
+[![Stargazers][stars-shield]][stars-url]
+[![Issues][issues-shield]][issues-url]
+[![License][license-shield]][license-url]
+[![GitHub][github-shield]][github-url]
 
-Le runner est interactif : il déroule les étapes une par une et demande confirmation avant chaque action.
+<!-- TABLE OF CONTENTS -->
+<details>
+  <summary>Table of Contents</summary>
+  <ol>
+    <li>
+      <a href="#about-the-project">About The Project</a>
+      <ul>
+        <li><a href="#description">Description</a></li>
+        <li><a href="#planned-features">Planned Features</a></li>
+        <li><a href="#built-with">Built With</a></li>
+      </ul>
+    </li>
+    <li>
+      <a href="#getting-started">Getting Started</a>
+      <ul>
+        <li><a href="#installation">Installation</a></li>
+        <li><a href="#configuration">Configuration</a></li>
+        <li><a href="#usage">Usage</a></li>
+        <li><a href="#tests">Tests</a></li>
+      </ul>
+    </li>
+    <li><a href="#contributing">Contributing</a>
+      <ul>
+        <li><a href="#license">License</a></li>
+        <li><a href="#contact">Contact</a></li>
+      </ul>
+    </li>
+  </ol>
+</details>
 
-## Ce que fait l'outil
+<!-- ABOUT THE PROJECT -->
+<a name="about-the-project"></a>
+# 🧠 About The Project
 
-- auto-commit sur la branche d'intégration configurée
-- création et merge de PRs entre branche d'intégration et branche de base
-- mise à jour de changelogs
-- synchronisation des branches de base locales
+<p align="center">
+  <a href="https://github.com/nlabrazi/dev-tools">
+    <img src="public/assets/images/screenshot.png" alt="Dev Tools Screenshot" width="100%" height="400" />
+  </a>
+</p>
 
-Par défaut, l'ordre d'exécution est le suivant :
+<a name="description"></a>
+### ℹ️ Description
 
-1. auto-commit
-2. merge vers les branches de base
-3. mise à jour des changelogs
-4. synchronisation des branches de base
+Dev Tools is a Python CLI runner designed to automate local Git workflows across multiple repositories. It guides each step interactively, asks for confirmation before sensitive actions, and centralizes repetitive routines commonly found in multi-repo environments.
 
-## Prérequis
+- 🔧 Interactive auto-commit on the configured integration branch, with a message preview before validation.
+- 🤖 Ollama-assisted commit and Pull Request message generation, with heuristic fallback when the model is disabled or unavailable.
+- 🔀 Pull Request creation and auto-merge between the integration branch and the base branch through `gh`.
+- 📝 `CHANGELOG.md` updates generated from Conventional Commits, with semver release suggestions.
+- 🔄 Safe synchronization of local base branches, with `origin/HEAD` resolution, legacy fallback, and explicit override support.
+- 🛡️ Security guardrails for remote Ollama hosts to prevent unintended transmission of Git diffs or commit summaries.
 
-- Python 3.10+
-- `git`
-- `gh` si vous utilisez les étapes de création/merge de PR via GitHub CLI
-- Ollama si vous voulez la génération assistée des messages de commit et de PR
+---
 
-Notes :
+<a name="planned-features"></a>
+## 🚀 Planned Features
 
-- si Ollama est désactivé ou indisponible, l'outil retombe sur un fallback heuristique
-- un host Ollama distant nécessite un opt-in explicite via les variables de sécurité dédiées
+- 📦 Add a true non-interactive mode for CI usage and fully scripted routines.
+- 🎯 Allow repository filtering by name, root directory, or execution step.
+- 📊 Produce more structured final reporting for completed actions, skips, and errors.
+- 🔌 Extend integrations beyond GitHub CLI for PR and release workflows.
+- ⚙️ Introduce configuration profiles to chain multiple execution strategies depending on the context.
 
-## Installation
+---
 
-Linux / macOS :
+<a name="built-with"></a>
+### 🏗️ Built With
+
+* [![Python][Python.io]][Python-url]
+* [![Git][Git.io]][Git-url]
+* [![GitHub CLI][GitHubCLI.io]][GitHubCLI-url]
+* [![Ollama][Ollama.io]][Ollama-url]
+* [![Rich][Rich.io]][Rich-url]
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+<!-- GETTING STARTED -->
+<a name="getting-started"></a>
+# ✅ Getting Started
+
+This project runs locally on 🐍 Python and orchestrates Git repositories available on your machine. To use the full feature set, install `git`, `gh` for Pull Request steps, and Ollama only if you want AI-assisted message generation.
+
+<a name="installation"></a>
+### 💻 Installation
 
 ```bash
+# Clone the repository
+git clone https://github.com/nlabrazi/dev-tools.git
+cd dev-tools
+
+# Create and activate a virtual environment
 python3 -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate  # On Windows use `.venv\Scripts\activate`
+
+# Install dependencies
+python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements.txt
+
+# Set up environment variables
+cp .env.example .env
+# Update .env with your local repositories, branches and Ollama settings
 ```
 
-Windows PowerShell :
+<a name="configuration"></a>
+### 🧩 Configuration
 
-```powershell
-py -m venv .venv
-.venv\Scripts\Activate.ps1
-py -m pip install -r requirements.txt
-```
+`run.py` automatically loads a `.env` file from the project root when present. Environment variables already defined in your shell take precedence.
 
-## Utilisation
-
-Linux / macOS :
-
-```bash
-python3 run.py --dry-run
-python3 run.py --prod
-python3 run.py --help
-```
-
-Windows :
-
-```powershell
-py run.py --dry-run
-py run.py --help
-```
-
-Règles :
-
-- `--dry-run` simule les actions sans modifier les repositories
-- `--prod` exécute les actions réelles
-- les deux options sont mutuellement exclusives et l'une des deux est obligatoire
-
-Le `--help` expose :
-
-- les modes d'exécution
-- des exemples de lancement
-- les principales variables d'environnement reconnues
-- la stratégie de résolution de branche de base
-
-## Configuration
-
-`run.py` charge automatiquement un fichier `.env` à la racine du projet s'il existe.
-
-Règles :
-
-- `.env` est optionnel
-- les variables déjà définies dans votre shell restent prioritaires
-- un exemple complet est fourni dans [.env.example](/home/kaox/code/bricolage/dev-tools/.env.example)
-
-Exemple minimal pour un usage local :
+Minimal example:
 
 ```dotenv
 DEVTOOLS_ROOT_DIRS=/home/you/code/pers:/home/you/code/bricolage
@@ -97,66 +125,112 @@ DEVTOOLS_REMOTE=origin
 OLLAMA_HOST=http://localhost:11434
 ```
 
-## Variables utiles
+Useful variables:
 
-Configuration Git / repositories :
+- `DEVTOOLS_ROOT_DIRS`: root directories to scan.
+- `DEVTOOLS_HEAD_BRANCH`: integration branch targeted by auto-commits and merges.
+- `DEVTOOLS_BASE_BRANCH`: forces the base branch instead of using automatic resolution.
+- `DEVTOOLS_REMOTE`: default Git remote.
+- `ENABLE_OLLAMA`: fully enables or disables Ollama integration.
+- `OLLAMA_ALLOW_REMOTE` and `OLLAMA_ALLOW_REMOTE_CONTEXT`: explicit opt-in for remote hosts.
 
-- `DEVTOOLS_ROOT_DIRS` : liste de répertoires racine à scanner, séparés par le séparateur système
-- `DEVTOOLS_REMOTE` : remote Git utilisé par défaut, `origin` par défaut
-- `DEVTOOLS_HEAD_BRANCH` : branche d'intégration, `staging` par défaut
-- `DEVTOOLS_BASE_BRANCH` : force une branche de base au lieu de résoudre `origin/HEAD`
-- `DEVTOOLS_GIT_TIMEOUT` : timeout par défaut des commandes Git, `60` secondes
-- `GH_PR_MERGE_TIMEOUT` : attente max pour constater un merge effectif, `90` secondes
-
-Configuration Ollama :
-
-- `ENABLE_OLLAMA=0` : désactive totalement l'usage d'Ollama
-- `OLLAMA_HOST` : URL du serveur Ollama, `http://localhost:11434` par défaut
-- `OLLAMA_MODEL` : modèle utilisé, `llama3.2` par défaut
-- `OLLAMA_TIMEOUT` : timeout HTTP Ollama, `60` secondes
-- `OLLAMA_NUM_CTX` : taille de contexte Ollama
-- `OLLAMA_MAX_FILES` : nombre max de fichiers injectés dans le prompt de commit
-- `OLLAMA_MAX_DIFF_CHARS` : taille max du diff injecté dans le prompt de commit
-- `OLLAMA_MAX_PR_SUMMARY_CHARS` : taille max du résumé injecté dans le prompt de PR
-
-Garde-fous sécurité :
-
-- `OLLAMA_ALLOW_REMOTE=1` : autorise un `OLLAMA_HOST` non local
-- `OLLAMA_ALLOW_REMOTE_CONTEXT=1` : autorise l'envoi du diff Git et des résumés de commits à un host distant
-- `OLLAMA_DEBUG=1` : affiche un aperçu tronqué des réponses Ollama
-- `OLLAMA_DEBUG=full` : affiche le contenu complet
-- `OLLAMA_DEBUG_MAX_CHARS` : taille de l'aperçu debug tronqué, `400` par défaut
-
-Important :
-
-- si `OLLAMA_HOST` est local, aucune variable de sécurité supplémentaire n'est nécessaire
-- si `OLLAMA_HOST` est distant, il faut un opt-in explicite
-- `OLLAMA_ALLOW_REMOTE=1` autorise uniquement le host distant
-- `OLLAMA_ALLOW_REMOTE_CONTEXT=1` autorise en plus l'envoi de diff Git et de résumés de commits vers ce host
-
-## Tests
-
-Runner recommandé :
+<a name="usage"></a>
+### ▶️ Usage
 
 ```bash
+# Simulate all actions without modifying repositories
+python3 run.py --dry-run
+
+# Execute the real workflow
+python3 run.py --prod
+
+# Show CLI help and resolved defaults
+python3 run.py --help
+```
+
+Execution rules:
+
+- `--dry-run` and `--prod` are mutually exclusive.
+- One of them is required.
+- The runner proposes steps in this order: auto-commit, merge into the base branch, changelog update, base branch synchronization.
+
+<a name="tests"></a>
+### 🧪 Tests
+
+```bash
+# Run the full rich test runner
 python3 -m tests
-```
 
-Exécuter un module de test ciblé :
-
-```bash
+# Run a targeted module
 python3 -m tests tests.test_commit
-python3 -m tests tests.test_merge
-```
 
-Arrêter au premier échec :
-
-```bash
+# Stop on first failure
 python3 -m tests --failfast
-```
 
-Alternative standard `unittest` :
-
-```bash
+# Standard unittest fallback
 python3 -m unittest -v
 ```
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+<!-- CONTRIBUTING -->
+<a name="contributing"></a>
+# 🙌 Contributing
+
+Contributions are welcome, especially on a tool that touches sensitive Git workflows. The recommended approach stays simple and traceable.
+
+To contribute:
+1. 🍴 Fork the repository
+2. 🔧 Create a dedicated branch (`git checkout -b feat/my-feature`)
+3. 💬 Commit your changes (`git commit -m "feat: add my feature"`)
+4. 🚀 Push your branch (`git push origin feat/my-feature`)
+5. 📨 Open a Pull Request
+
+If you change core behavior, add or update the related tests before opening the PR.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+<!-- LICENSE -->
+<a name="license"></a>
+### 📄 License
+
+This repository currently does not include an explicit license file.
+
+In practice, this means the code is not formally distributed under a declared open source license. If you want to clearly allow usage, modification, and redistribution, add a `LICENSE` file and then update this section.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+<!-- CONTACT -->
+<a name="contact"></a>
+### 📬 Contact
+
+- 👤 [GitHub Profile][github-url]
+- 📨 [Open an issue][issues-url]
+- 📁 [Project Repository](https://github.com/nlabrazi/dev-tools)
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+<!-- MARKDOWN LINKS & IMAGES -->
+[contributors-shield]: https://img.shields.io/github/contributors/nlabrazi/dev-tools.svg?style=for-the-badge
+[contributors-url]: https://github.com/nlabrazi/dev-tools/graphs/contributors
+[forks-shield]: https://img.shields.io/github/forks/nlabrazi/dev-tools.svg?style=for-the-badge
+[forks-url]: https://github.com/nlabrazi/dev-tools/network/members
+[stars-shield]: https://img.shields.io/github/stars/nlabrazi/dev-tools.svg?style=for-the-badge
+[stars-url]: https://github.com/nlabrazi/dev-tools/stargazers
+[issues-shield]: https://img.shields.io/github/issues/nlabrazi/dev-tools.svg?style=for-the-badge
+[issues-url]: https://github.com/nlabrazi/dev-tools/issues
+[license-shield]: https://img.shields.io/badge/license-not%20specified-lightgrey.svg?style=for-the-badge
+[license-url]: #license
+[github-shield]: https://img.shields.io/badge/GitHub-nlabrazi-181717.svg?style=for-the-badge&logo=github&logoColor=white
+[github-url]: https://github.com/nlabrazi
+[product-screenshot]: public/assets/images/screenshot.png
+[Python.io]: https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54
+[Python-url]: https://www.python.org/
+[Git.io]: https://img.shields.io/badge/git-F05032?style=for-the-badge&logo=git&logoColor=white
+[Git-url]: https://git-scm.com/
+[GitHubCLI.io]: https://img.shields.io/badge/GitHub%20CLI-181717?style=for-the-badge&logo=github&logoColor=white
+[GitHubCLI-url]: https://cli.github.com/
+[Ollama.io]: https://img.shields.io/badge/-Ollama-000000?style=for-the-badge&logo=ollama&logoColor=white
+[Ollama-url]: https://ollama.com/
+[Rich.io]: https://img.shields.io/badge/Rich-FAA61A?style=for-the-badge&logo=rich
+[Rich-url]: https://github.com/Textualize/rich
