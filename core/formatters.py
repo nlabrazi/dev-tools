@@ -4,6 +4,34 @@ import json
 from typing import Any, Dict, Optional, Tuple
 
 
+def _normalize_payload(parsed: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    If model returned fields at top-level instead of nested object,
+    wrap them automatically.
+    """
+    if not isinstance(parsed, dict):
+        return {}
+    if "commit" not in parsed:
+        if any(k in parsed for k in ("type", "scope", "subject", "body", "breaking")):
+            return {"commit": parsed}
+    if "mr" not in parsed:
+        if any(k in parsed for k in ("title", "description")):
+            return {"mr": parsed}
+    return parsed
+
+
+def _as_clean_string(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return False
+
+
 def safe_parse_json(raw: str) -> Optional[Dict[str, Any]]:
     """
     Try to parse a JSON string safely.
@@ -13,26 +41,20 @@ def safe_parse_json(raw: str) -> Optional[Dict[str, Any]]:
     """
     if raw is None:
         return None
+    if isinstance(raw, dict):
+        normalized = _normalize_payload(raw)
+        return normalized or None
+    if not isinstance(raw, str):
+        return None
     raw = raw.strip()
-
-    def normalize(parsed: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        If model returned fields at top-level instead of nested object,
-        wrap them automatically.
-        """
-        if isinstance(parsed, dict) and "commit" not in parsed:
-            if any(k in parsed for k in ("type", "scope", "subject", "body", "breaking")):
-                return {"commit": parsed}
-        if isinstance(parsed, dict) and "mr" not in parsed:
-            if any(k in parsed for k in ("title", "description")):
-                return {"mr": parsed}
-        return parsed
+    if not raw:
+        return None
 
     # Fast path
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, dict):
-            return normalize(parsed)
+            return _normalize_payload(parsed)
         return None
     except Exception:
         pass
@@ -48,7 +70,7 @@ def safe_parse_json(raw: str) -> Optional[Dict[str, Any]]:
     try:
         parsed = json.loads(candidate)
         if isinstance(parsed, dict):
-            return normalize(parsed)
+            return _normalize_payload(parsed)
         return None
     except Exception:
         return None
@@ -68,15 +90,15 @@ def build_conventional_commit(data: Dict[str, Any]) -> str:
     }
     Returns full commit message (header + body + optional BREAKING CHANGE).
     """
-    if "commit" not in data or not isinstance(data["commit"], dict):
+    if not isinstance(data, dict) or "commit" not in data or not isinstance(data["commit"], dict):
         raise ValueError("Invalid JSON: missing 'commit' object")
 
     c = data["commit"]
-    c_type = (c.get("type") or "").strip()
-    scope = (c.get("scope") or "").strip()
-    subject = (c.get("subject") or "").strip()
-    body = (c.get("body") or "").strip()
-    breaking = bool(c.get("breaking", False))
+    c_type = _as_clean_string(c.get("type"))
+    scope = _as_clean_string(c.get("scope"))
+    subject = _as_clean_string(c.get("subject"))
+    body = _as_clean_string(c.get("body"))
+    breaking = _as_bool(c.get("breaking", False))
 
     if not c_type or not subject:
         raise ValueError("Invalid commit JSON: 'type' and 'subject' are required")
@@ -107,12 +129,12 @@ def build_pr(data: Dict[str, Any]) -> Tuple[str, str]:
     }
     Returns (title, description).
     """
-    if "mr" not in data or not isinstance(data["mr"], dict):
+    if not isinstance(data, dict) or "mr" not in data or not isinstance(data["mr"], dict):
         raise ValueError("Invalid JSON: missing 'mr' object")
 
     mr = data["mr"]
-    title = (mr.get("title") or "").strip()
-    desc = (mr.get("description") or "").strip()
+    title = _as_clean_string(mr.get("title"))
+    desc = _as_clean_string(mr.get("description"))
 
     if not title or not desc:
         raise ValueError("Invalid MR JSON: 'title' and 'description' are required")

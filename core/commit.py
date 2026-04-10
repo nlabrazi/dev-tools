@@ -4,9 +4,9 @@ from datetime import datetime
 from collections import Counter
 from rich.console import Console
 
-from utils.common import env_int, run_command, trim_text_middle
+from utils.common import env_int, is_dry_run, run_command, trim_text_middle
 from utils.console import ask_yes_no
-from core.config import DEFAULT_HEAD_BRANCH, ROOT_DIRS
+from core.config import DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE, ROOT_DIRS
 from core.repositories import iter_git_repositories
 from core.ollama import chat_json, OllamaError
 from core.prompts import COMMIT_SYSTEM, COMMIT_USER_TEMPLATE
@@ -73,6 +73,7 @@ def extract_plain_commit(raw: str) -> str | None:
         return f"{header}\n\n" + "\n".join(body_lines)
     return header
 
+
 def is_comment_line(line: str) -> bool:
     stripped = line.lstrip()
     return (
@@ -93,6 +94,40 @@ def git_status_porcelain(path: str) -> list[str]:
     out = run_command(["git", "status", "--porcelain"], cwd=path).stdout or ""
     lines = [l.rstrip("\n") for l in out.splitlines() if l.strip()]
     return lines
+
+
+def get_current_branch(path: str) -> str:
+    return (run_command(["git", "branch", "--show-current"], cwd=path, silent=True).stdout or "").strip()
+
+
+def resolve_auto_commit_target(path: str) -> tuple[str, str] | None:
+    target_branch = (DEFAULT_HEAD_BRANCH or "").strip()
+    target_remote = (DEFAULT_REMOTE or "").strip()
+
+    if not target_branch:
+        print("❌ Auto-commit target branch is empty. Check DEVTOOLS_HEAD_BRANCH.")
+        return None
+    if not target_remote:
+        print("❌ Auto-commit remote is empty. Check DEVTOOLS_REMOTE.")
+        return None
+
+    current_branch = get_current_branch(path)
+    if not current_branch:
+        print("❌ Could not resolve the current branch. Auto-commit skipped.")
+        return None
+    if current_branch != target_branch:
+        print(
+            f"⚠️ Auto-commit expects branch '{target_branch}', current branch is '{current_branch}'. "
+            "Repo skipped to avoid committing on one branch and pushing another."
+        )
+        return None
+
+    remote_check = run_command(["git", "remote", "get-url", target_remote], cwd=path, silent=True)
+    if remote_check.returncode != 0:
+        print(f"❌ Remote '{target_remote}' is not configured for this repo. Auto-commit skipped.")
+        return None
+
+    return target_remote, target_branch
 
 
 def has_staged_changes(status_lines: list[str]) -> bool:
@@ -119,8 +154,17 @@ def get_diff_content_cached(path: str) -> str:
     return (run_command(["git", "diff", "--cached"], cwd=path).stdout or "").strip()
 
 
+def get_diff_content_worktree(path: str) -> str:
+    return (run_command(["git", "diff"], cwd=path).stdout or "").strip()
+
+
 def get_modified_files_names_cached(path: str) -> list[str]:
     out = (run_command(["git", "diff", "--cached", "--name-only"], cwd=path).stdout or "").strip()
+    return out.splitlines() if out else []
+
+
+def get_modified_files_names_worktree(path: str) -> list[str]:
+    out = (run_command(["git", "diff", "--name-only"], cwd=path).stdout or "").strip()
     return out.splitlines() if out else []
 
 
@@ -263,7 +307,7 @@ def generate_commit_message_with_ollama(repo: str, files: list[str], diff_conten
         return None
 
 
-def commit_with_message(repo_path: str, full_message: str) -> bool:
+def commit_with_message(repo_path: str, full_message: str) -> str:
     """
     Commits with header + body without losing formatting.
     We do: git commit -m <header> -m <body>
@@ -274,7 +318,11 @@ def commit_with_message(repo_path: str, full_message: str) -> bool:
 
     if not header:
         print("❌ Empty commit header, abort.")
-        return False
+        return "failed"
+
+    if is_dry_run():
+        print("🧪 Dry-run: would create the commit shown above.")
+        return "dry-run"
 
     cmd = ["git", "commit", "-m", header]
     if body:
@@ -283,8 +331,21 @@ def commit_with_message(repo_path: str, full_message: str) -> bool:
     res = run_command(cmd, cwd=repo_path)
     if res.returncode != 0:
         print(f"❌ git commit failed:\n{(res.stderr or '').strip()}")
-        return False
-    return True
+        return "failed"
+    return "committed"
+
+
+def push_head_to_branch(repo_path: str, remote: str, branch: str) -> str:
+    if is_dry_run():
+        print(f"🧪 Dry-run: would push HEAD to {remote}/{branch}.")
+        return "dry-run"
+
+    refspec = f"HEAD:refs/heads/{branch}"
+    res = run_command(["git", "push", remote, refspec], cwd=repo_path)
+    if res.returncode != 0:
+        print(f"❌ git push failed:\n{(res.stderr or '').strip()}")
+        return "failed"
+    return "pushed"
 
 
 def auto_commit_all_repos(root_dirs: list[str]):
@@ -301,6 +362,7 @@ def auto_commit_all_repos(root_dirs: list[str]):
 
         for repo, repo_path in iter_git_repositories(root_dir):
             found_repos = True
+            use_worktree_diff = False
 
             # 1) Status first (key fix)
             status_lines = git_status_porcelain(repo_path)
@@ -313,16 +375,26 @@ def auto_commit_all_repos(root_dirs: list[str]):
             unstaged = has_unstaged_changes(status_lines)
 
             console.print(f"\n📦 Repo: [bold green]{repo}[/]")
+            target = resolve_auto_commit_target(repo_path)
+            if not target:
+                continue
+            target_remote, target_branch = target
+            print(f"🎯 Auto-commit target: {target_remote}/{target_branch}")
+
             if unstaged and not staged:
                 print("🟡 Changes detected but nothing staged yet.")
                 print("   Tip: we need staged changes to build commit message from --cached.")
 
                 choice = ask_yes_no("➕ Stage ALL changes (git add -A) ?", default="n")
                 if choice:
-                    add_result = run_command(["git", "add", "-A"], cwd=repo_path)
-                    if add_result.returncode != 0:
-                        print(f"❌ git add failed:\n{(add_result.stderr or '').strip()}")
-                        continue
+                    if is_dry_run():
+                        print("🧪 Dry-run: would stage all changes with git add -A.")
+                        use_worktree_diff = True
+                    else:
+                        add_result = run_command(["git", "add", "-A"], cwd=repo_path)
+                        if add_result.returncode != 0:
+                            print(f"❌ git add failed:\n{(add_result.stderr or '').strip()}")
+                            continue
                     staged = True
                 else:
                     print("⏭️ Skipped (nothing staged).")
@@ -333,12 +405,16 @@ def auto_commit_all_repos(root_dirs: list[str]):
                 continue
 
             # 2) Now we can read cached diff
-            diff_content = get_diff_content_cached(repo_path)
+            diff_content = get_diff_content_worktree(repo_path) if use_worktree_diff else get_diff_content_cached(repo_path)
             if not diff_content:
                 print(f"⚪ {repo}: No staged diff to commit")
                 continue
 
-            files = get_modified_files_names_cached(repo_path)
+            files = (
+                get_modified_files_names_worktree(repo_path)
+                if use_worktree_diff
+                else get_modified_files_names_cached(repo_path)
+            )
 
             # 3) Generate message (Ollama first, fallback second)
             commit_message = generate_commit_message_with_ollama(repo, files, diff_content)
@@ -364,22 +440,29 @@ def auto_commit_all_repos(root_dirs: list[str]):
                 continue
 
             with console.status("[bold green]Committing changes...[/]", spinner="dots"):
-                ok = commit_with_message(repo_path, commit_message)
-                if not ok:
+                commit_status = commit_with_message(repo_path, commit_message)
+                if commit_status == "failed":
                     continue
-                results["committed"] += 1
+                if commit_status == "committed":
+                    results["committed"] += 1
 
-            print("✅ Commit done.\n")
+            if commit_status == "committed":
+                print("✅ Commit done.\n")
+            else:
+                print("🧪 Dry-run: commit skipped.\n")
 
-            push_input = ask_yes_no(f"📤 Do you want to push to {DEFAULT_HEAD_BRANCH} ?", default="n")
+            push_input = ask_yes_no(
+                f"📤 Do you want to push current HEAD to {target_remote}/{target_branch} ?",
+                default="n",
+            )
             if push_input:
                 with console.status("[bold cyan]Pushing...[/]", spinner="dots"):
-                    res = run_command(["git", "push", "origin", DEFAULT_HEAD_BRANCH], cwd=repo_path)
-                    if res.returncode != 0:
-                        print(f"❌ git push failed:\n{(res.stderr or '').strip()}")
-                    else:
+                    push_status = push_head_to_branch(repo_path, target_remote, target_branch)
+                    if push_status == "pushed":
                         results["pushed"] += 1
-                        print(f"🚀 Pushed to {DEFAULT_HEAD_BRANCH}\n")
+                        print(f"🚀 Pushed HEAD to {target_remote}/{target_branch}\n")
+                    elif push_status == "dry-run":
+                        print(f"🧪 Dry-run: push skipped for {target_remote}/{target_branch}\n")
             else:
                 print("⏭️ Skipped git push")
 

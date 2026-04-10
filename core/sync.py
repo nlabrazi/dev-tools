@@ -5,7 +5,7 @@ import os
 from core.config import DEFAULT_REMOTE, ROOT_DIRS
 from core.repositories import iter_git_repositories
 from rich.console import Console
-from utils.common import run_command
+from utils.common import is_dry_run, run_command
 from utils.console import ask_yes_no
 
 console = Console()
@@ -42,26 +42,42 @@ def get_default_remote_branch(repo_path: str) -> str | None:
     return None
 
 
-def ensure_local_branch_exists(repo_path: str, branch: str) -> bool:
+def ensure_local_branch_exists(repo_path: str, repo_name: str, branch: str) -> str:
     """
     Ensure local branch exists; if not, try to create it tracking origin/<branch>.
     """
     # Does local branch exist?
     res = run_command(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=repo_path, silent=True)
     if res.returncode == 0:
-        return True
+        return "ready"
+
+    if is_dry_run():
+        console.print(
+            f"🧪 [cyan]{repo_name}[/]: would create local branch '{branch}' tracking {REMOTE}/{branch}."
+        )
+        return "dry-run"
 
     # Create local branch tracking origin
     res2 = run_command(["git", "checkout", "-b", branch, f"{REMOTE}/{branch}"], cwd=repo_path, silent=True)
-    return res2.returncode == 0
+    if res2.returncode != 0:
+        return "failed"
+    return "ready"
 
 
-def checkout_branch(repo_path: str, repo_name: str, branch: str) -> bool:
+def checkout_branch(repo_path: str, repo_name: str, branch: str) -> str:
+    current_branch = git_output(repo_path, ["branch", "--show-current"])
+    if current_branch == branch:
+        return "ready"
+
+    if is_dry_run():
+        console.print(f"🧪 [cyan]{repo_name}[/]: would checkout {branch}.")
+        return "dry-run"
+
     res = run_command(["git", "checkout", branch], cwd=repo_path, silent=True)
     if res.returncode != 0:
         console.print(f"❌ [red]{repo_name}[/]: checkout {branch} failed:\n{(res.stderr or '').strip()}")
-        return False
-    return True
+        return "failed"
+    return "ready"
 
 
 def get_ahead_behind(repo_path: str, branch: str) -> tuple[int, int] | None:
@@ -84,12 +100,16 @@ def get_ahead_behind(repo_path: str, branch: str) -> tuple[int, int] | None:
         return None
 
 
-def pull_ff_only(repo_path: str, repo_name: str, branch: str) -> bool:
+def pull_ff_only(repo_path: str, repo_name: str, branch: str) -> str:
+    if is_dry_run():
+        console.print(f"🧪 [cyan]{repo_name}[/]: would pull --ff-only {REMOTE}/{branch}.")
+        return "dry-run"
+
     res = run_command(["git", "pull", "--ff-only", REMOTE, branch], cwd=repo_path, silent=True)
     if res.returncode != 0:
         console.print(f"❌ [red]{repo_name}[/]: pull --ff-only failed:\n{(res.stderr or '').strip()}")
-        return False
-    return True
+        return "failed"
+    return "pulled"
 
 
 def sync_default_branch(repo_path: str, repo_name: str) -> None:
@@ -106,11 +126,15 @@ def sync_default_branch(repo_path: str, repo_name: str) -> None:
         return
 
     # Ensure local branch exists (some repos only have main locally or nothing checked out)
-    if not ensure_local_branch_exists(repo_path, default_branch):
+    branch_status = ensure_local_branch_exists(repo_path, repo_name, default_branch)
+    if branch_status == "failed":
         console.print(f"❌ [red]{repo_name}[/]: could not create/find local branch '{default_branch}'.")
         return
+    if branch_status == "dry-run":
+        return
 
-    if not checkout_branch(repo_path, repo_name, default_branch):
+    checkout_status = checkout_branch(repo_path, repo_name, default_branch)
+    if checkout_status == "failed":
         return
 
     counts = get_ahead_behind(repo_path, default_branch)
@@ -121,11 +145,11 @@ def sync_default_branch(repo_path: str, repo_name: str) -> None:
     ahead, behind = counts
 
     if behind <= 0 and ahead <= 0:
-        head = git_output(repo_path, ["rev-parse", "--short", "HEAD"])
+        head = git_output(repo_path, ["rev-parse", "--short", default_branch])
         console.print(f"✔️  [green]{repo_name}[/]: {default_branch} up-to-date (HEAD {head})")
         return
     if behind <= 0 and ahead > 0:
-        head = git_output(repo_path, ["rev-parse", "--short", "HEAD"])
+        head = git_output(repo_path, ["rev-parse", "--short", default_branch])
         console.print(
             f"ℹ️  [cyan]{repo_name}[/]: {default_branch} is ahead of {REMOTE}/{default_branch} "
             f"by {ahead} commit(s) (HEAD {head})"
@@ -144,8 +168,9 @@ def sync_default_branch(repo_path: str, repo_name: str) -> None:
         console.print(f"⏭️  [yellow]{repo_name}[/]: skipped pull.")
         return
 
-    if pull_ff_only(repo_path, repo_name, default_branch):
-        head = git_output(repo_path, ["rev-parse", "--short", "HEAD"])
+    pull_status = pull_ff_only(repo_path, repo_name, default_branch)
+    if pull_status == "pulled":
+        head = git_output(repo_path, ["rev-parse", "--short", default_branch])
         console.print(f"✅ [green]{repo_name}[/]: pulled {default_branch} (HEAD {head})")
 
 

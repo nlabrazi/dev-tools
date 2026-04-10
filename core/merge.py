@@ -7,7 +7,7 @@ from rich.console import Console
 
 from core.config import DEFAULT_BASE_BRANCH, DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE, ROOT_DIRS
 from core.repositories import iter_git_repositories
-from utils.common import env_int, run_command, run_command_checked, trim_text_middle
+from utils.common import env_int, is_dry_run, run_command, run_command_checked, trim_text_middle
 from utils.console import ask_yes_no
 from core.ollama import chat_json, OllamaError
 from core.prompts import PR_SYSTEM, PR_USER_TEMPLATE
@@ -455,12 +455,22 @@ _Auto-generated on {date_str}_
 
     if pr_number:
         print(f"🔗 Existing Pull Request detected: #{pr_number}")
+        if is_dry_run():
+            print(f"🧪 Dry-run: would enable auto-merge for PR #{pr_number} in {repo_name}.")
+            return
     else:
         print(f"\n📘 Repository: [bold orange]{repo_name}[/]")
         print(f"--- Pull Request Preview ---\nTitle: {title}\n\n{body}\n---\n")
 
         if not ask_yes_no("🚀 Do you want to create and auto-merge this PR?", default="n"):
             print("❌ Skipped.\n")
+            return
+
+        if is_dry_run():
+            print(
+                f"🧪 Dry-run: would create a pull request from {DEFAULT_HEAD_BRANCH} "
+                f"to {DEFAULT_BASE_BRANCH} and enable auto-merge for {repo_name}."
+            )
             return
 
         with console.status("[bold green]Creating pull request...", spinner="dots"):

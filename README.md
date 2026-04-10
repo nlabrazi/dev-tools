@@ -95,6 +95,33 @@ source venv/bin/activate  # or .\venv\Scripts\activate (Windows)
 pip install -r requirements.txt
 ```
 
+### 🧪 Tests
+
+Run the default test suite with the standard library runner:
+
+```bash
+python3 -m unittest
+```
+
+If you want verbose output during local debugging:
+
+```bash
+python3 -m unittest -v
+```
+
+If you want a cleaner colored output with a summary panel:
+
+```bash
+python3 -m tests
+```
+
+You can also target a specific module or test:
+
+```bash
+python3 -m tests tests.test_changelog
+python3 -m tests tests.test_changelog.ChangelogTests.test_generate_changelog_groups_known_and_unknown_commits
+```
+
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 

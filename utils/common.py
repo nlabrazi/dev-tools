@@ -11,6 +11,7 @@ DRY_RUN = False
 _SAFE_PREFIXES: list[list[str]] = [
     ["git", "status"],
     ["git", "diff"],
+    ["git", "fetch"],
     ["git", "log"],
     ["git", "rev-parse"],
     ["git", "merge-base"],
@@ -23,6 +24,8 @@ _SAFE_PREFIXES: list[list[str]] = [
     ["git", "ls-files"],
     ["git", "config"],
     ["git", "tag"],
+    ["gh", "pr", "list"],
+    ["gh", "pr", "view"],
 ]
 
 # Commands that mutate state (must be blocked in dry-run)
@@ -38,10 +41,22 @@ _BLOCK_PREFIXES: list[list[str]] = [
     ["git", "restore"],
     ["git", "tag", "-a"],
     ["git", "tag", "--annotate"],
-    ["gh"], # GitHub CLI actions should not run in dry-run
+    ["gh", "pr", "create"],
+    ["gh", "pr", "merge"],
 ]
 
 _DRY_RUN_BLOCKED_RC = 99
+
+
+class DryRunBlockedError(RuntimeError):
+    def __init__(self, action: str, command: Union[List[str], str]) -> None:
+        if isinstance(command, str):
+            command_label = command
+        else:
+            command_label = " ".join(command)
+        self.action = action
+        self.command = command_label
+        super().__init__(f"{action} skipped in dry-run: would execute `{command_label}`")
 
 
 def set_dry_run(state: bool = True) -> None:
@@ -51,6 +66,10 @@ def set_dry_run(state: bool = True) -> None:
 
 def is_dry_run() -> bool:
     return DRY_RUN
+
+
+def is_dry_run_result(result: subprocess.CompletedProcess) -> bool:
+    return result.returncode == _DRY_RUN_BLOCKED_RC
 
 
 def _is_prefix(command: list[str], prefix: list[str]) -> bool:
@@ -132,6 +151,14 @@ def run_command_checked(
     result = run_command(command, cwd=cwd, silent=silent, text=text)
     if result.returncode == 0:
         return result
+
+    if is_dry_run_result(result):
+        if isinstance(command, str):
+            command_label = command
+        else:
+            command_label = " ".join(command)
+        action = context or command_label
+        raise DryRunBlockedError(action, command)
 
     details = ((result.stderr or "").strip() or (result.stdout or "").strip() or f"exit code {result.returncode}")
     if isinstance(command, str):
