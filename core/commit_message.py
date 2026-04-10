@@ -1,4 +1,3 @@
-import os
 import re
 from collections import Counter
 from datetime import datetime
@@ -6,7 +5,13 @@ from datetime import datetime
 from rich.console import Console
 
 from core.formatters import build_conventional_commit, safe_parse_json
-from core.ollama import OllamaError, chat_json
+from core.ollama import (
+    OllamaError,
+    chat_json,
+    debug_log_output,
+    ensure_repo_context_allowed,
+    is_ollama_enabled,
+)
 from core.prompts import COMMIT_SYSTEM, COMMIT_USER_TEMPLATE
 from utils.common import env_int, trim_text_middle
 
@@ -140,6 +145,8 @@ def generate_commit_message_with_ollama(repo: str, files: list[str], diff_conten
     """
     Returns full commit message (header + body) or None if Ollama fails / bad JSON.
     """
+    if not is_ollama_enabled():
+        return None
 
     def parse_and_build(raw: str) -> str | None:
         data = safe_parse_json(raw)
@@ -151,6 +158,8 @@ def generate_commit_message_with_ollama(repo: str, files: list[str], diff_conten
             return None
 
     try:
+        ensure_repo_context_allowed("git diff content")
+
         max_files = env_int("OLLAMA_MAX_FILES", 80, minimum=1)
         files_for_prompt = files[:max_files]
         files_block = "\n".join(f"- {file_name}" for file_name in files_for_prompt) or "- (unknown)"
@@ -176,8 +185,7 @@ def generate_commit_message_with_ollama(repo: str, files: list[str], diff_conten
                 temperature=0.2,
                 json_mode=True,
             )
-        if os.getenv("OLLAMA_DEBUG", "0") == "1":
-            print("\n[DEBUG] Raw Ollama output (attempt 1):\n", raw, "\n")
+        debug_log_output("Commit generation output (attempt 1)", raw)
 
         built = parse_and_build(raw)
         if built:
@@ -194,8 +202,7 @@ def generate_commit_message_with_ollama(repo: str, files: list[str], diff_conten
                 temperature=0.0,
                 json_mode=True,
             )
-        if os.getenv("OLLAMA_DEBUG", "0") == "1":
-            print("\n[DEBUG] Raw Ollama output (attempt 2):\n", raw_retry, "\n")
+        debug_log_output("Commit generation output (attempt 2)", raw_retry)
 
         built_retry = parse_and_build(raw_retry)
         if built_retry:
@@ -220,8 +227,7 @@ def generate_commit_message_with_ollama(repo: str, files: list[str], diff_conten
                 temperature=0.1,
                 json_mode=False,
             )
-        if os.getenv("OLLAMA_DEBUG", "0") == "1":
-            print("\n[DEBUG] Raw Ollama output (plain recovery):\n", raw_plain, "\n")
+        debug_log_output("Commit generation output (plain recovery)", raw_plain)
 
         plain_recovery = extract_plain_commit(raw_plain)
         if plain_recovery:

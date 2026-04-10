@@ -2,10 +2,23 @@ import unittest
 import subprocess
 from unittest.mock import patch
 
-from core.merge import create_and_merge_pr
+from core.merge import create_and_merge_pr, generate_pr_text_with_ollama
+from core.ollama import OllamaError
 
 
 class MergeDryRunTests(unittest.TestCase):
+    def test_generate_pr_text_with_ollama_rejects_remote_context_without_opt_in(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "OLLAMA_HOST": "http://example.com:11434",
+                "OLLAMA_ALLOW_REMOTE": "1",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(OllamaError):
+                generate_pr_text_with_ollama("repo", "- feat(api): ship feature", "main")
+
     def test_create_and_merge_pr_dry_run_skips_pr_creation(self) -> None:
         with patch("core.merge.ensure_clean_worktree"), patch(
             "core.merge.resolve_merge_base_branch",

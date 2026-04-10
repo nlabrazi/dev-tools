@@ -40,7 +40,11 @@ class CommitMessageGenerationTests(unittest.TestCase):
         }
         """
 
-        with patch("core.commit_message.chat_json", return_value=raw), patch(
+        with patch.dict(
+            "os.environ",
+            {"OLLAMA_HOST": "http://localhost:11434"},
+            clear=True,
+        ), patch("core.commit_message.chat_json", return_value=raw), patch(
             "core.commit_message.console.status",
             return_value=nullcontext(),
         ), patch("core.commit_message.print"):
@@ -51,7 +55,11 @@ class CommitMessageGenerationTests(unittest.TestCase):
     def test_generate_commit_message_with_ollama_uses_plain_text_fallback_from_model_output(self) -> None:
         raw = "feat(api): ship endpoint\n\nadd route"
 
-        with patch("core.commit_message.chat_json", return_value=raw), patch(
+        with patch.dict(
+            "os.environ",
+            {"OLLAMA_HOST": "http://localhost:11434"},
+            clear=True,
+        ), patch("core.commit_message.chat_json", return_value=raw), patch(
             "core.commit_message.console.status",
             return_value=nullcontext(),
         ), patch("core.commit_message.print"):
@@ -69,6 +77,20 @@ class CommitMessageGenerationTests(unittest.TestCase):
             )
 
         self.assertEqual(commit_message, "feat: update api.py and worker.py (2026-04-10 12:34)")
+
+    def test_generate_commit_message_with_ollama_skips_remote_context_without_opt_in(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "OLLAMA_HOST": "http://example.com:11434",
+                "OLLAMA_ALLOW_REMOTE": "1",
+            },
+            clear=True,
+        ), patch("core.commit_message.chat_json") as chat_json, patch("core.commit_message.print"):
+            commit_message = generate_commit_message_with_ollama("repo", ["api.py"], "diff --git")
+
+        self.assertIsNone(commit_message)
+        chat_json.assert_not_called()
 
     def test_build_fallback_commit_message_uses_generic_title_without_files(self) -> None:
         commit_message = build_fallback_commit_message(

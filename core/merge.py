@@ -10,7 +10,13 @@ from core.repositories import iter_git_repositories
 from utils.common import env_int, is_dry_run, run_command, trim_text_middle
 from utils.git import git_command, git_command_checked, git_output
 from utils.console import ask_yes_no
-from core.ollama import chat_json, OllamaError
+from core.ollama import (
+    OllamaError,
+    chat_json,
+    debug_log_output,
+    ensure_repo_context_allowed,
+    is_ollama_enabled,
+)
 from core.prompts import PR_SYSTEM, PR_USER_TEMPLATE
 from core.formatters import safe_parse_json, build_pr
 from core.versioning import (
@@ -248,10 +254,6 @@ def tag_release_interactive(repo_path: str, repo_name: str, commit_summary: str)
     print(f"✅ Tag created and pushed: {tag}")
 
 
-def is_ollama_enabled() -> bool:
-    return os.getenv("ENABLE_OLLAMA", "1") == "1"
-
-
 def extract_plain_pr(raw: str) -> tuple[str | None, str | None]:
     """
     Best-effort extraction when model output is not valid JSON.
@@ -316,6 +318,7 @@ def generate_pr_text_with_ollama(
     """
     if not is_ollama_enabled():
         return None, None
+    ensure_repo_context_allowed("git commit summary")
 
     max_summary_chars = env_int("OLLAMA_MAX_PR_SUMMARY_CHARS", 5000, minimum=1200)
     commit_summary_trimmed = trim_text_middle(commit_summary.strip(), max_summary_chars)
@@ -332,8 +335,7 @@ def generate_pr_text_with_ollama(
     ]
 
     raw = chat_json(messages, temperature=0.2, json_mode=True)
-    if os.getenv("OLLAMA_DEBUG", "0") == "1":
-        print("\n[DEBUG] Raw Ollama PR output (attempt 1):\n", raw, "\n")
+    debug_log_output("PR generation output (attempt 1)", raw)
 
     data = safe_parse_json(raw)
     if data:
@@ -348,8 +350,7 @@ def generate_pr_text_with_ollama(
 
     print("⚠️ Ollama PR output invalid, retrying once.")
     raw_retry = chat_json(messages, temperature=0.0, json_mode=True)
-    if os.getenv("OLLAMA_DEBUG", "0") == "1":
-        print("\n[DEBUG] Raw Ollama PR output (attempt 2):\n", raw_retry, "\n")
+    debug_log_output("PR generation output (attempt 2)", raw_retry)
 
     data_retry = safe_parse_json(raw_retry)
     if data_retry:
@@ -383,8 +384,7 @@ def generate_pr_text_with_ollama(
         temperature=0.1,
         json_mode=False,
     )
-    if os.getenv("OLLAMA_DEBUG", "0") == "1":
-        print("\n[DEBUG] Raw Ollama PR output (plain recovery):\n", raw_plain, "\n")
+    debug_log_output("PR generation output (plain recovery)", raw_plain)
 
     plain_recovery_title, plain_recovery_body = extract_plain_pr(raw_plain)
     if plain_recovery_title and plain_recovery_body:
