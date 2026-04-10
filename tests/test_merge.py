@@ -1,5 +1,5 @@
-import unittest
 import subprocess
+import unittest
 from unittest.mock import patch
 
 from core.merge import create_and_merge_pr
@@ -17,7 +17,7 @@ class MergeDryRunTests(unittest.TestCase):
             "core.merge.get_commit_summary",
             return_value="- feat(api): ship feature",
         ), patch(
-            "core.merge.generate_pr_text_with_ollama",
+            "core.merge.generate_pr_text",
             return_value=("Test PR", "## What\n- Item\n\n## Why\n- Item\n\n## Testing\n- N/A\n\n## Notes\n- N/A"),
         ), patch(
             "core.merge.existing_pr_number",
@@ -41,7 +41,7 @@ class MergeDryRunTests(unittest.TestCase):
             "core.merge.get_commit_summary",
             return_value="- feat(api): ship feature",
         ), patch(
-            "core.merge.generate_pr_text_with_ollama",
+            "core.merge.generate_pr_text",
             return_value=("Test PR", "Body"),
         ), patch(
             "core.merge.existing_pr_number",
@@ -74,7 +74,7 @@ class MergeDryRunTests(unittest.TestCase):
             "core.merge.get_commit_summary",
             return_value="- feat(api): ship feature",
         ), patch(
-            "core.merge.generate_pr_text_with_ollama",
+            "core.merge.generate_pr_text",
             return_value=("Test PR", "Body"),
         ), patch(
             "core.merge.existing_pr_number",

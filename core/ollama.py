@@ -1,15 +1,21 @@
-# core/ollama.py
 import json
 import os
-import urllib.request
 import urllib.error
+import urllib.request
+from urllib.parse import urlparse, urlunparse
+
+from utils.common import trim_text_middle
 
 DEFAULT_HOST = "http://localhost:11434"
 DEFAULT_MODEL = "llama3.2"
 DEFAULT_TIMEOUT = 60.0
+DEFAULT_DEBUG_MAX_CHARS = 400
+LOCAL_HOSTNAMES = {"localhost", "127.0.0.1", "::1"}
+
 
 class OllamaError(RuntimeError):
     pass
+
 
 def _resolve_timeout(raw_timeout: str) -> float:
     try:
@@ -30,6 +36,79 @@ def _resolve_optional_int(raw_value: str | None, minimum: int = 1) -> int | None
     return value
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return raw_value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _is_local_hostname(hostname: str | None) -> bool:
+    if not hostname:
+        return False
+    return hostname in LOCAL_HOSTNAMES
+
+
+def get_ollama_host() -> str:
+    raw_host = (os.getenv("OLLAMA_HOST") or DEFAULT_HOST).strip()
+    parsed = urlparse(raw_host)
+
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise OllamaError(
+            "OLLAMA_HOST must be an absolute http(s) URL, for example http://localhost:11434"
+        )
+
+    hostname = parsed.hostname
+    if not hostname:
+        raise OllamaError("OLLAMA_HOST must include a valid hostname")
+
+    if not _is_local_hostname(hostname) and not _env_flag("OLLAMA_ALLOW_REMOTE"):
+        raise OllamaError(
+            f"Refusing non-local OLLAMA_HOST '{raw_host}'. Set OLLAMA_ALLOW_REMOTE=1 to allow it."
+        )
+
+    normalized_path = parsed.path.rstrip("/")
+    return urlunparse((parsed.scheme, parsed.netloc, normalized_path, "", "", ""))
+
+
+def is_ollama_enabled() -> bool:
+    return _env_flag("ENABLE_OLLAMA", default=True)
+
+
+def ensure_repo_context_allowed(context_label: str) -> None:
+    host = get_ollama_host()
+    hostname = urlparse(host).hostname
+    if _is_local_hostname(hostname):
+        return
+
+    if not _env_flag("OLLAMA_ALLOW_REMOTE_CONTEXT"):
+        raise OllamaError(
+            f"Refusing to send {context_label} to remote OLLAMA_HOST '{host}'. "
+            "Set OLLAMA_ALLOW_REMOTE_CONTEXT=1 to allow it."
+        )
+
+
+def debug_log_output(label: str, content: str) -> None:
+    debug_mode = (os.getenv("OLLAMA_DEBUG") or "0").strip().lower()
+    if debug_mode in {"", "0", "false", "no", "off"}:
+        return
+
+    text = (content or "").strip()
+    max_chars = _resolve_optional_int(
+        os.getenv("OLLAMA_DEBUG_MAX_CHARS"),
+        minimum=80,
+    ) or DEFAULT_DEBUG_MAX_CHARS
+
+    if debug_mode == "full":
+        preview = text
+        suffix = ""
+    else:
+        preview = trim_text_middle(text, max_chars)
+        suffix = "" if preview == text else " [truncated]"
+
+    print(f"\n[DEBUG] {label}{suffix}:\n{preview}\n")
+
+
 def chat_json(
     messages,
     model: str | None = None,
@@ -40,7 +119,7 @@ def chat_json(
     Calls Ollama /api/chat and returns assistant content (string).
     If json_mode=True, requests strict JSON output via Ollama "format":"json".
     """
-    host = os.getenv("OLLAMA_HOST", DEFAULT_HOST)
+    host = get_ollama_host()
     model_name = model or os.getenv("OLLAMA_MODEL", DEFAULT_MODEL)
     timeout = _resolve_timeout(os.getenv("OLLAMA_TIMEOUT", str(DEFAULT_TIMEOUT)))
 

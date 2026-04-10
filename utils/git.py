@@ -15,12 +15,14 @@ def git_command(
     *,
     silent: bool = True,
     timeout: float | None = None,
+    max_output_chars: int | None = None,
 ) -> subprocess.CompletedProcess:
     return run_command(
         ["git"] + args,
         cwd=repo_path,
         silent=silent,
         timeout=get_git_timeout() if timeout is None else timeout,
+        max_output_chars=max_output_chars,
     )
 
 
@@ -31,6 +33,7 @@ def git_command_checked(
     silent: bool = True,
     context: str | None = None,
     timeout: float | None = None,
+    max_output_chars: int | None = None,
 ) -> subprocess.CompletedProcess:
     return run_command_checked(
         ["git"] + args,
@@ -38,6 +41,7 @@ def git_command_checked(
         silent=silent,
         context=context,
         timeout=get_git_timeout() if timeout is None else timeout,
+        max_output_chars=max_output_chars,
     )
 
 
@@ -47,12 +51,14 @@ def git_output(
     *,
     silent: bool = True,
     timeout: float | None = None,
+    max_output_chars: int | None = None,
 ) -> str:
     result = git_command(
         repo_path,
         args,
         silent=silent,
         timeout=timeout,
+        max_output_chars=max_output_chars,
     )
     if result.returncode != 0:
         return ""
@@ -66,6 +72,7 @@ def git_output_checked(
     silent: bool = True,
     context: str | None = None,
     timeout: float | None = None,
+    max_output_chars: int | None = None,
 ) -> str:
     result = git_command_checked(
         repo_path,
@@ -73,5 +80,6 @@ def git_output_checked(
         silent=silent,
         context=context,
         timeout=timeout,
+        max_output_chars=max_output_chars,
     )
     return (result.stdout or "").strip()

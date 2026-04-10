@@ -1,18 +1,15 @@
 import os
 import time
-from datetime import datetime
 
 from rich import print
 from rich.console import Console
 
 from core.config import DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE, ROOT_DIRS, resolve_repo_base_branch
+from core.pr_message import generate_pr_text
 from core.repositories import iter_git_repositories
-from utils.common import env_int, is_dry_run, run_command, trim_text_middle
+from utils.common import env_int, is_dry_run, run_command
 from utils.git import git_command, git_command_checked, git_output
 from utils.console import ask_yes_no
-from core.ollama import chat_json, OllamaError
-from core.prompts import PR_SYSTEM, PR_USER_TEMPLATE
-from core.formatters import safe_parse_json, build_pr
 from core.versioning import (
     compute_next_version,
     determine_bump_from_commits,
@@ -248,153 +245,6 @@ def tag_release_interactive(repo_path: str, repo_name: str, commit_summary: str)
     print(f"✅ Tag created and pushed: {tag}")
 
 
-def is_ollama_enabled() -> bool:
-    return os.getenv("ENABLE_OLLAMA", "1") == "1"
-
-
-def extract_plain_pr(raw: str) -> tuple[str | None, str | None]:
-    """
-    Best-effort extraction when model output is not valid JSON.
-    Expects lines with "TITLE:" and markdown sections.
-    """
-    if not raw:
-        return None, None
-
-    lines: list[str] = []
-    for line in raw.replace("\r\n", "\n").splitlines():
-        s = line.rstrip()
-        if s.strip().startswith("```"):
-            continue
-        lines.append(s)
-
-    # Find title
-    title = ""
-    title_idx = -1
-    for idx, line in enumerate(lines):
-        s = line.strip()
-        if not s:
-            continue
-        if s.lower().startswith("title:"):
-            title = s.split(":", 1)[1].strip()
-            title_idx = idx
-            break
-        if s.startswith("#") and not s.startswith("## "):
-            title = s.lstrip("#").strip()
-            title_idx = idx
-            break
-        title = s
-        title_idx = idx
-        break
-
-    if not title:
-        return None, None
-    title = title[:80].rstrip()
-    if not title:
-        return None, None
-
-    body = "\n".join(lines[title_idx + 1 :]).strip()
-    required_sections = ("## What", "## Why", "## Testing", "## Notes")
-    if not body or any(section not in body for section in required_sections):
-        base_body = body or "- Summary not provided."
-        body = (
-            f"## What\n{base_body}\n\n"
-            "## Why\n- N/A\n\n"
-            "## Testing\n- Not specified in commit summary.\n\n"
-            "## Notes\n- N/A"
-        )
-
-    return title, body
-
-
-def generate_pr_text_with_ollama(
-    repo_name: str,
-    commit_summary: str,
-    base_branch: str,
-) -> tuple[str | None, str | None]:
-    """
-    Returns (title, body) if success, else (None, None).
-    """
-    if not is_ollama_enabled():
-        return None, None
-
-    max_summary_chars = env_int("OLLAMA_MAX_PR_SUMMARY_CHARS", 5000, minimum=1200)
-    commit_summary_trimmed = trim_text_middle(commit_summary.strip(), max_summary_chars)
-
-    pr_user = PR_USER_TEMPLATE.format(
-        repo=repo_name,
-        base=base_branch,
-        head=DEFAULT_HEAD_BRANCH,
-        commit_summary=commit_summary_trimmed,
-    )
-    messages = [
-        {"role": "system", "content": PR_SYSTEM},
-        {"role": "user", "content": pr_user},
-    ]
-
-    raw = chat_json(messages, temperature=0.2, json_mode=True)
-    if os.getenv("OLLAMA_DEBUG", "0") == "1":
-        print("\n[DEBUG] Raw Ollama PR output (attempt 1):\n", raw, "\n")
-
-    data = safe_parse_json(raw)
-    if data:
-        try:
-            return build_pr(data)
-        except Exception:
-            pass
-    plain_title, plain_body = extract_plain_pr(raw)
-    if plain_title and plain_body:
-        print("⚠️ Ollama PR JSON invalid, using plain-text PR from model output.")
-        return plain_title, plain_body
-
-    print("⚠️ Ollama PR output invalid, retrying once.")
-    raw_retry = chat_json(messages, temperature=0.0, json_mode=True)
-    if os.getenv("OLLAMA_DEBUG", "0") == "1":
-        print("\n[DEBUG] Raw Ollama PR output (attempt 2):\n", raw_retry, "\n")
-
-    data_retry = safe_parse_json(raw_retry)
-    if data_retry:
-        try:
-            return build_pr(data_retry)
-        except Exception:
-            pass
-    plain_retry_title, plain_retry_body = extract_plain_pr(raw_retry)
-    if plain_retry_title and plain_retry_body:
-        print("⚠️ Ollama PR JSON invalid on retry, using plain-text PR from model output.")
-        return plain_retry_title, plain_retry_body
-
-    plain_system = (
-        "Return plain text only with this exact structure:\n"
-        "TITLE: <max 80 chars>\n"
-        "## What\n"
-        "...\n"
-        "## Why\n"
-        "...\n"
-        "## Testing\n"
-        "...\n"
-        "## Notes\n"
-        "...\n"
-        "Do not invent tests; if unknown write that testing evidence is not provided."
-    )
-    raw_plain = chat_json(
-        [
-            {"role": "system", "content": plain_system},
-            {"role": "user", "content": pr_user},
-        ],
-        temperature=0.1,
-        json_mode=False,
-    )
-    if os.getenv("OLLAMA_DEBUG", "0") == "1":
-        print("\n[DEBUG] Raw Ollama PR output (plain recovery):\n", raw_plain, "\n")
-
-    plain_recovery_title, plain_recovery_body = extract_plain_pr(raw_plain)
-    if plain_recovery_title and plain_recovery_body:
-        print("⚠️ Ollama PR JSON invalid, plain recovery mode used.")
-        return plain_recovery_title, plain_recovery_body
-
-    print("⚠️ Ollama PR output unusable, fallback used.")
-    return None, None
-
-
 # ---------------- Main PR flow ----------------
 
 def create_and_merge_pr(path: str, repo_name: str, base_branch: str | None = None) -> None:
@@ -416,39 +266,18 @@ def create_and_merge_pr(path: str, repo_name: str, base_branch: str | None = Non
     if current:
         print(f"🔎 Current branch (info only): [bold]{current}[/]")
 
-    date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     commit_summary = get_commit_summary(path, base_branch)
 
     if not commit_summary:
         print("⚠️  No new commits found to merge.")
         return
 
-    # Fallback PR text
-    fallback_title = f"🔀 chore: merge {DEFAULT_HEAD_BRANCH} into {base_branch} ({date_str})"
-    fallback_body = f"""## 📦 Merge Summary
-
-This pull request merges the latest validated commits from `{DEFAULT_HEAD_BRANCH}` into `{base_branch}`.
-
----
-
-**✨ Commits included:**
-
-{commit_summary}
-
----
-
-_Auto-generated on {date_str}_
-"""
-
-    # Try Ollama
-    title, body = None, None
-    try:
-        title, body = generate_pr_text_with_ollama(repo_name, commit_summary, base_branch)
-    except OllamaError as e:
-        print(f"⚠️  Ollama unavailable for PR text, fallback used. Reason: {e}")
-
-    title = title or fallback_title
-    body = body or fallback_body
+    title, body = generate_pr_text(
+        repo_name,
+        commit_summary,
+        base_branch,
+        head_branch=DEFAULT_HEAD_BRANCH,
+    )
 
     # Check existing PR
     pr_number = existing_pr_number(path, base_branch)

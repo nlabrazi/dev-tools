@@ -25,6 +25,29 @@ class GitHelperTests(unittest.TestCase):
             cwd="/tmp/repo",
             silent=True,
             timeout=42,
+            max_output_chars=None,
+        )
+
+    def test_git_command_forwards_output_limit(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["git", "diff"],
+            returncode=0,
+            stdout="diff --git",
+            stderr="",
+        )
+        with patch("utils.git.run_command", return_value=completed) as run_command, patch(
+            "utils.git.get_git_timeout",
+            return_value=30,
+        ):
+            result = git_command("/tmp/repo", ["diff"], max_output_chars=512)
+
+        self.assertEqual(result.stdout, "diff --git")
+        run_command.assert_called_once_with(
+            ["git", "diff"],
+            cwd="/tmp/repo",
+            silent=True,
+            timeout=30,
+            max_output_chars=512,
         )
 
     def test_git_output_returns_empty_string_on_failure(self) -> None:
@@ -59,6 +82,7 @@ class GitHelperTests(unittest.TestCase):
             silent=True,
             context="resolve head",
             timeout=15,
+            max_output_chars=None,
         )
 
 

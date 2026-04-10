@@ -1,103 +1,56 @@
 import os
-import re
-from datetime import datetime
-from collections import Counter
 from rich.console import Console
 
-from utils.common import env_int, is_dry_run, run_command, trim_text_middle
+from utils.common import describe_command_failure, env_int, is_dry_run
 from utils.console import ask_yes_no
+from utils.git import git_command, git_output
 from core.config import DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE, ROOT_DIRS
+from core.commit_message import generate_commit_message
 from core.repositories import iter_git_repositories
-from core.ollama import chat_json, OllamaError
-from core.prompts import COMMIT_SYSTEM, COMMIT_USER_TEMPLATE
-from core.formatters import safe_parse_json, build_conventional_commit
 
 console = Console()
-
-COMMIT_HEADER_RE = re.compile(
-    r"^(feat|fix|refactor|docs|test|chore|perf|ci|build|style|ui)(\([^)]+\))?(!)?: .+$",
-    re.IGNORECASE,
-)
+DEFAULT_COMMIT_DIFF_MAX_CHARS = 4500
 
 
-def extract_plain_commit(raw: str) -> str | None:
-    """
-    Best-effort extraction when model output is not valid JSON.
-    Keeps a proper Conventional Commit header and optional bullet body.
-    """
-    if not raw:
-        return None
-
-    cleaned: list[str] = []
-    for line in raw.replace("\r\n", "\n").splitlines():
-        s = line.rstrip()
-        if s.strip().startswith("```"):
-            continue
-        cleaned.append(s)
-
-    non_empty = [l.strip() for l in cleaned if l.strip()]
-    if not non_empty:
-        return None
-
-    header_idx = -1
-    header = ""
-    for idx, line in enumerate(non_empty):
-        candidate = line
-        if line.lower().startswith("commit:"):
-            candidate = line.split(":", 1)[1].strip()
-        if COMMIT_HEADER_RE.match(candidate):
-            header_idx = idx
-            header = candidate
-            break
-
-    if not header:
-        return None
-
-    body_lines: list[str] = []
-    for line in non_empty[header_idx + 1 :]:
-        if COMMIT_HEADER_RE.match(line):
-            break
-        text = line
-        if text.lower().startswith("body:"):
-            text = text.split(":", 1)[1].strip()
-        text = text.strip()
-        if not text:
-            continue
-        if not text.startswith("- "):
-            text = f"- {text}"
-        body_lines.append(text)
-        if len(body_lines) >= 6:
-            break
-
-    if body_lines:
-        return f"{header}\n\n" + "\n".join(body_lines)
-    return header
+def get_commit_diff_max_chars() -> int:
+    return env_int("OLLAMA_MAX_DIFF_CHARS", DEFAULT_COMMIT_DIFF_MAX_CHARS, minimum=800)
 
 
-def is_comment_line(line: str) -> bool:
-    stripped = line.lstrip()
-    return (
-        stripped.startswith("#")
-        or stripped.startswith("//")
-        or stripped.startswith("/*")
-        or stripped.startswith("*")
+def _git_output_or_report(
+    path: str,
+    args: list[str],
+    *,
+    context: str,
+    max_output_chars: int | None = None,
+) -> str | None:
+    result = git_command(
+        path,
+        args,
+        silent=True,
+        max_output_chars=max_output_chars,
     )
+    if result.returncode != 0:
+        print(f"❌ {context} failed:\n{describe_command_failure(result)}")
+        return None
+    return (result.stdout or "").rstrip("\n")
 
 
-def git_status_porcelain(path: str) -> list[str]:
+def git_status_porcelain(path: str) -> list[str] | None:
     """
     Returns lines like:
       ' M file.txt' (unstaged)
       'M  file.txt' (staged)
       '?? file.txt' (untracked)
     """
-    out = run_command(["git", "status", "--porcelain"], cwd=path).stdout or ""
+    out = _git_output_or_report(path, ["status", "--porcelain"], context="git status --porcelain")
+    if out is None:
+        return None
     lines = [l.rstrip("\n") for l in out.splitlines() if l.strip()]
     return lines
 
 
 def get_current_branch(path: str) -> str:
-    return (run_command(["git", "branch", "--show-current"], cwd=path, silent=True).stdout or "").strip()
+    return git_output(path, ["branch", "--show-current"])
 
 
 def resolve_auto_commit_target(path: str) -> tuple[str, str] | None:
@@ -122,7 +75,7 @@ def resolve_auto_commit_target(path: str) -> tuple[str, str] | None:
         )
         return None
 
-    remote_check = run_command(["git", "remote", "get-url", target_remote], cwd=path, silent=True)
+    remote_check = git_command(path, ["remote", "get-url", target_remote], silent=True)
     if remote_check.returncode != 0:
         print(f"❌ Remote '{target_remote}' is not configured for this repo. Auto-commit skipped.")
         return None
@@ -150,161 +103,36 @@ def has_unstaged_changes(status_lines: list[str]) -> bool:
     return False
 
 
-def get_diff_content_cached(path: str) -> str:
-    return (run_command(["git", "diff", "--cached"], cwd=path).stdout or "").strip()
+def get_diff_content_cached(path: str) -> str | None:
+    return _git_output_or_report(
+        path,
+        ["diff", "--cached", "--no-ext-diff"],
+        context="git diff --cached",
+        max_output_chars=get_commit_diff_max_chars(),
+    )
 
 
-def get_diff_content_worktree(path: str) -> str:
-    return (run_command(["git", "diff"], cwd=path).stdout or "").strip()
+def get_diff_content_worktree(path: str) -> str | None:
+    return _git_output_or_report(
+        path,
+        ["diff", "--no-ext-diff"],
+        context="git diff",
+        max_output_chars=get_commit_diff_max_chars(),
+    )
 
 
-def get_modified_files_names_cached(path: str) -> list[str]:
-    out = (run_command(["git", "diff", "--cached", "--name-only"], cwd=path).stdout or "").strip()
+def get_modified_files_names_cached(path: str) -> list[str] | None:
+    out = _git_output_or_report(path, ["diff", "--cached", "--name-only"], context="git diff --cached --name-only")
+    if out is None:
+        return None
     return out.splitlines() if out else []
 
 
-def get_modified_files_names_worktree(path: str) -> list[str]:
-    out = (run_command(["git", "diff", "--name-only"], cwd=path).stdout or "").strip()
+def get_modified_files_names_worktree(path: str) -> list[str] | None:
+    out = _git_output_or_report(path, ["diff", "--name-only"], context="git diff --name-only")
+    if out is None:
+        return None
     return out.splitlines() if out else []
-
-
-def detect_commit_type_from_diff(diff_content: str) -> str:
-    if not diff_content:
-        return "chore"
-
-    diff_lines = diff_content.lower().splitlines()
-    type_counter = Counter()
-
-    for line in diff_lines:
-        if not (line.startswith("+") or line.startswith("-")):
-            continue
-
-        if is_comment_line(line):
-            if "fix" in line or "bug" in line or "error" in line or "typo" in line:
-                type_counter["fix"] += 0.5
-            if "refactor" in line:
-                type_counter["refactor"] += 0.5
-            continue
-
-        if "fix" in line or "bug" in line or "error" in line or "typo" in line:
-            type_counter["fix"] += 1
-        if "function" in line or "def " in line or "class " in line:
-            type_counter["feat"] += 2
-        if "refactor" in line or ("remove" in line and len(line) > 30):
-            type_counter["refactor"] += 1
-        if ".md" in line or "documentation" in line:
-            type_counter["docs"] += 1
-        if ".css" in line or ".scss" in line or ".html" in line:
-            type_counter["style"] += 1
-        if ".json" in line or ".yml" in line or "config" in line or "build" in line:
-            type_counter["chore"] += 1
-
-    if not type_counter:
-        return "chore"
-
-    selected_type, _ = type_counter.most_common(1)[0]
-    return selected_type
-
-
-def generate_commit_message_with_ollama(repo: str, files: list[str], diff_content: str) -> str | None:
-    """
-    Returns full commit message (header + body) or None if Ollama fails / bad JSON.
-    """
-    def parse_and_build(raw: str) -> str | None:
-        data = safe_parse_json(raw)
-        if not data:
-            return None
-        try:
-            return build_conventional_commit(data)
-        except Exception:
-            return None
-
-    try:
-        max_files = env_int("OLLAMA_MAX_FILES", 80, minimum=1)
-        files_for_prompt = files[:max_files]
-        files_block = "\n".join(f"- {f}" for f in files_for_prompt) or "- (unknown)"
-        if len(files) > max_files:
-            files_block += f"\n- ... (+{len(files) - max_files} more)"
-
-        max_diff_chars = env_int("OLLAMA_MAX_DIFF_CHARS", 4500, minimum=800)
-        trimmed_diff = trim_text_middle(diff_content, max_diff_chars)
-
-        user_prompt = COMMIT_USER_TEMPLATE.format(
-            repo=repo,
-            files=files_block,
-            diff=trimmed_diff,
-        )
-        messages = [
-            {"role": "system", "content": COMMIT_SYSTEM},
-            {"role": "user", "content": user_prompt},
-        ]
-
-        with console.status("[bold cyan]🤖 Generating commit message...[/]", spinner="dots"):
-            raw = chat_json(
-                messages,
-                temperature=0.2,
-                json_mode=True,
-            )
-        if os.getenv("OLLAMA_DEBUG", "0") == "1":
-            print("\n[DEBUG] Raw Ollama output (attempt 1):\n", raw, "\n")
-
-        built = parse_and_build(raw)
-        if built:
-            return built
-        plain = extract_plain_commit(raw)
-        if plain:
-            print("⚠️ Ollama JSON invalid, using plain-text commit from model output.")
-            return plain
-
-        print("⚠️ Ollama output is not valid commit JSON, retrying once.")
-        with console.status("[bold cyan]🤖 Retrying commit message generation...[/]", spinner="dots"):
-            raw_retry = chat_json(
-                messages,
-                temperature=0.0,
-                json_mode=True,
-            )
-        if os.getenv("OLLAMA_DEBUG", "0") == "1":
-            print("\n[DEBUG] Raw Ollama output (attempt 2):\n", raw_retry, "\n")
-
-        built_retry = parse_and_build(raw_retry)
-        if built_retry:
-            return built_retry
-        plain_retry = extract_plain_commit(raw_retry)
-        if plain_retry:
-            print("⚠️ Ollama JSON invalid on retry, using plain-text commit from model output.")
-            return plain_retry
-
-        plain_system = (
-            "Return ONLY a Conventional Commit message in plain text.\n"
-            "First line format: type(scope optional): subject\n"
-            "Allowed types: feat, fix, refactor, docs, test, chore, perf, ci, build, style.\n"
-            "Optional body lines must be bullets prefixed by '- '."
-        )
-        with console.status("[bold cyan]🤖 Recovering commit message (plain mode)...[/]", spinner="dots"):
-            raw_plain = chat_json(
-                [
-                    {"role": "system", "content": plain_system},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.1,
-                json_mode=False,
-            )
-        if os.getenv("OLLAMA_DEBUG", "0") == "1":
-            print("\n[DEBUG] Raw Ollama output (plain recovery):\n", raw_plain, "\n")
-
-        plain_recovery = extract_plain_commit(raw_plain)
-        if plain_recovery:
-            print("⚠️ Ollama JSON invalid, plain recovery mode used.")
-            return plain_recovery
-
-        print("⚠️ Ollama returned unusable output, fallback used.")
-        return None
-    except OllamaError as e:
-        print(f"⚠️ Ollama unavailable, fallback used. Reason: {e}")
-        return None
-    except Exception as e:
-        print(f"⚠️ Ollama output invalid, fallback used. Reason: {e}")
-        return None
 
 
 def commit_with_message(repo_path: str, full_message: str) -> str:
@@ -328,9 +156,9 @@ def commit_with_message(repo_path: str, full_message: str) -> str:
     if body:
         cmd += ["-m", body]
 
-    res = run_command(cmd, cwd=repo_path)
+    res = git_command(repo_path, cmd[1:])
     if res.returncode != 0:
-        print(f"❌ git commit failed:\n{(res.stderr or '').strip()}")
+        print(f"❌ git commit failed:\n{describe_command_failure(res)}")
         return "failed"
     return "committed"
 
@@ -341,9 +169,9 @@ def push_head_to_branch(repo_path: str, remote: str, branch: str) -> str:
         return "dry-run"
 
     refspec = f"HEAD:refs/heads/{branch}"
-    res = run_command(["git", "push", remote, refspec], cwd=repo_path)
+    res = git_command(repo_path, ["push", remote, refspec])
     if res.returncode != 0:
-        print(f"❌ git push failed:\n{(res.stderr or '').strip()}")
+        print(f"❌ git push failed:\n{describe_command_failure(res)}")
         return "failed"
     return "pushed"
 
@@ -366,6 +194,8 @@ def auto_commit_all_repos(root_dirs: list[str]):
 
             # 1) Status first (key fix)
             status_lines = git_status_porcelain(repo_path)
+            if status_lines is None:
+                continue
 
             if not status_lines:
                 print(f"⚪ {repo}: Clean working tree")
@@ -391,9 +221,9 @@ def auto_commit_all_repos(root_dirs: list[str]):
                         print("🧪 Dry-run: would stage all changes with git add -A.")
                         use_worktree_diff = True
                     else:
-                        add_result = run_command(["git", "add", "-A"], cwd=repo_path)
+                        add_result = git_command(repo_path, ["add", "-A"])
                         if add_result.returncode != 0:
-                            print(f"❌ git add failed:\n{(add_result.stderr or '').strip()}")
+                            print(f"❌ git add failed:\n{describe_command_failure(add_result)}")
                             continue
                     staged = True
                 else:
@@ -406,6 +236,8 @@ def auto_commit_all_repos(root_dirs: list[str]):
 
             # 2) Now we can read cached diff
             diff_content = get_diff_content_worktree(repo_path) if use_worktree_diff else get_diff_content_cached(repo_path)
+            if diff_content is None:
+                continue
             if not diff_content:
                 print(f"⚪ {repo}: No staged diff to commit")
                 continue
@@ -415,19 +247,11 @@ def auto_commit_all_repos(root_dirs: list[str]):
                 if use_worktree_diff
                 else get_modified_files_names_cached(repo_path)
             )
+            if files is None:
+                continue
 
-            # 3) Generate message (Ollama first, fallback second)
-            commit_message = generate_commit_message_with_ollama(repo, files, diff_content)
-
-            if not commit_message:
-                # fallback heuristic
-                commit_type = detect_commit_type_from_diff(diff_content)
-                date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-                if files:
-                    title_keywords = " and ".join(files[:2])
-                    commit_message = f"{commit_type}: update {title_keywords} ({date_str})"
-                else:
-                    commit_message = f"{commit_type}: auto commit based on diff analysis ({date_str})"
+            # 3) Generate message (LLM first, heuristic fallback second)
+            commit_message = generate_commit_message(repo, files, diff_content)
 
             # 4) Preview
             print("\n--- Preview of commit message ---\n")
