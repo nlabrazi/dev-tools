@@ -110,3 +110,13 @@ class ChangelogTests(unittest.TestCase):
                 ),
             ],
         )
+
+    def test_commit_and_push_changelog_dry_run_reports_simulation(self) -> None:
+        with patch("core.changelog.get_current_branch", return_value="staging"), patch(
+            "core.changelog.is_dry_run",
+            return_value=True,
+        ), patch("core.changelog.run_command_checked") as run_command_checked, patch("core.changelog.print"):
+            result = commit_and_push_changelog("/tmp/repo")
+
+        self.assertFalse(result)
+        run_command_checked.assert_not_called()

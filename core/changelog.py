@@ -9,7 +9,7 @@ from rich.console import Console
 from core.config import CHANGELOG_FILENAME, DEFAULT_REMOTE, ROOT_DIRS
 from core.conventional_commits import parse_conventional_commit
 from core.repositories import iter_git_repositories
-from utils.common import prepend_text_file, run_command, run_command_checked
+from utils.common import is_dry_run, prepend_text_file, run_command, run_command_checked
 from utils.console import ask_yes_no
 
 console = Console()
@@ -111,6 +111,13 @@ def commit_and_push_changelog(repo_path: str) -> bool:
         print("❌ Could not resolve the current branch. Changelog push skipped.")
         return False
 
+    if is_dry_run():
+        print(
+            f"🧪 Dry-run: would stage, commit and push {CHANGELOG_FILENAME} "
+            f"to {DEFAULT_REMOTE}/{branch}."
+        )
+        return False
+
     with console.status("[bold green]Committing and pushing changelog...", spinner="dots"):
         try:
             run_command_checked(
@@ -183,7 +190,10 @@ def update_all_repos_interactive(root_dirs: list[str]) -> None:
             if update_changelog(repo_path, changelog_preview):
                 print(f"✅ Changelog updated for {repo}")
             else:
-                print(f"🧪 Dry-run active or write skipped for {repo}")
+                if is_dry_run():
+                    print(f"🧪 Dry-run: would update {CHANGELOG_FILENAME} for {repo}")
+                else:
+                    print(f"❌ Failed to update {CHANGELOG_FILENAME} for {repo}")
 
             if ask_yes_no("📤 Do you want to commit and push the changelog ?", default="n"):
                 commit_and_push_changelog(repo_path)

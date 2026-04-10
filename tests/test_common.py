@@ -5,9 +5,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from utils.common import (
+    DryRunBlockedError,
     is_dry_run,
     prepend_text_file,
     run_command,
+    run_command_checked,
     set_dry_run,
 )
 
@@ -48,6 +50,37 @@ class DryRunTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+
+    def test_run_command_allows_fetch_and_readonly_gh_commands_in_dry_run(self) -> None:
+        set_dry_run(True)
+
+        fetch_completed = subprocess.CompletedProcess(
+            args=["git", "fetch", "--all", "--prune"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+        gh_completed = subprocess.CompletedProcess(
+            args=["gh", "pr", "view", "42", "--json", "state"],
+            returncode=0,
+            stdout='{"state":"OPEN"}',
+            stderr="",
+        )
+        with patch("utils.common.subprocess.run", side_effect=[fetch_completed, gh_completed]) as subprocess_run, patch(
+            "builtins.print"
+        ):
+            fetch_result = run_command(["git", "fetch", "--all", "--prune"], cwd="/tmp/repo", silent=True)
+            gh_result = run_command(["gh", "pr", "view", "42", "--json", "state"], cwd="/tmp/repo", silent=True)
+
+        self.assertEqual(fetch_result.returncode, 0)
+        self.assertEqual(gh_result.returncode, 0)
+        self.assertEqual(subprocess_run.call_count, 2)
+
+    def test_run_command_checked_raises_dry_run_blocked_error_for_mutations(self) -> None:
+        set_dry_run(True)
+
+        with patch("builtins.print"), self.assertRaises(DryRunBlockedError):
+            run_command_checked(["git", "commit", "-m", "test"], cwd="/tmp/repo", context="commit changes")
 
     def test_prepend_text_file_is_blocked_in_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

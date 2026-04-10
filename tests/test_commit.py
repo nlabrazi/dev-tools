@@ -3,7 +3,7 @@ import unittest
 from contextlib import nullcontext
 from unittest.mock import patch
 
-from core.commit import auto_commit_all_repos, push_head_to_branch, resolve_auto_commit_target
+from core.commit import auto_commit_all_repos, commit_with_message, push_head_to_branch, resolve_auto_commit_target
 
 
 class CommitTargetTests(unittest.TestCase):
@@ -55,6 +55,24 @@ class CommitTargetTests(unittest.TestCase):
             cwd="/tmp/repo",
         )
 
+    def test_commit_with_message_returns_dry_run_without_git_commit(self) -> None:
+        with patch("core.commit.is_dry_run", return_value=True), patch("core.commit.run_command") as run_command, patch(
+            "core.commit.print"
+        ):
+            status = commit_with_message("/tmp/repo", "feat: add feature")
+
+        self.assertEqual(status, "dry-run")
+        run_command.assert_not_called()
+
+    def test_push_head_to_branch_returns_dry_run_without_git_push(self) -> None:
+        with patch("core.commit.is_dry_run", return_value=True), patch("core.commit.run_command") as run_command, patch(
+            "core.commit.print"
+        ):
+            status = push_head_to_branch("/tmp/repo", "fork", "staging")
+
+        self.assertEqual(status, "dry-run")
+        run_command.assert_not_called()
+
 
 class AutoCommitWorkflowTests(unittest.TestCase):
     def test_auto_commit_all_repos_skips_when_target_validation_fails(self) -> None:
@@ -90,10 +108,10 @@ class AutoCommitWorkflowTests(unittest.TestCase):
             side_effect=[True, True],
         ), patch(
             "core.commit.commit_with_message",
-            return_value=True,
+            return_value="committed",
         ) as commit_with_message, patch(
             "core.commit.push_head_to_branch",
-            return_value=True,
+            return_value="pushed",
         ) as push_head_to_branch_mock, patch(
             "core.commit.console.status",
             return_value=nullcontext(),
