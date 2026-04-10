@@ -1,24 +1,11 @@
-import unittest
 import subprocess
+import unittest
 from unittest.mock import patch
 
-from core.merge import create_and_merge_pr, generate_pr_text_with_ollama
-from core.ollama import OllamaError
+from core.merge import create_and_merge_pr
 
 
 class MergeDryRunTests(unittest.TestCase):
-    def test_generate_pr_text_with_ollama_rejects_remote_context_without_opt_in(self) -> None:
-        with patch.dict(
-            "os.environ",
-            {
-                "OLLAMA_HOST": "http://example.com:11434",
-                "OLLAMA_ALLOW_REMOTE": "1",
-            },
-            clear=True,
-        ):
-            with self.assertRaises(OllamaError):
-                generate_pr_text_with_ollama("repo", "- feat(api): ship feature", "main")
-
     def test_create_and_merge_pr_dry_run_skips_pr_creation(self) -> None:
         with patch("core.merge.ensure_clean_worktree"), patch(
             "core.merge.resolve_merge_base_branch",
@@ -30,7 +17,7 @@ class MergeDryRunTests(unittest.TestCase):
             "core.merge.get_commit_summary",
             return_value="- feat(api): ship feature",
         ), patch(
-            "core.merge.generate_pr_text_with_ollama",
+            "core.merge.generate_pr_text",
             return_value=("Test PR", "## What\n- Item\n\n## Why\n- Item\n\n## Testing\n- N/A\n\n## Notes\n- N/A"),
         ), patch(
             "core.merge.existing_pr_number",
@@ -54,7 +41,7 @@ class MergeDryRunTests(unittest.TestCase):
             "core.merge.get_commit_summary",
             return_value="- feat(api): ship feature",
         ), patch(
-            "core.merge.generate_pr_text_with_ollama",
+            "core.merge.generate_pr_text",
             return_value=("Test PR", "Body"),
         ), patch(
             "core.merge.existing_pr_number",
@@ -87,7 +74,7 @@ class MergeDryRunTests(unittest.TestCase):
             "core.merge.get_commit_summary",
             return_value="- feat(api): ship feature",
         ), patch(
-            "core.merge.generate_pr_text_with_ollama",
+            "core.merge.generate_pr_text",
             return_value=("Test PR", "Body"),
         ), patch(
             "core.merge.existing_pr_number",
