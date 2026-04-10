@@ -5,7 +5,7 @@ from datetime import datetime
 from rich import print
 from rich.console import Console
 
-from core.config import DEFAULT_BASE_BRANCH, DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE, ROOT_DIRS
+from core.config import DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE, ROOT_DIRS, resolve_repo_base_branch
 from core.repositories import iter_git_repositories
 from utils.common import env_int, is_dry_run, run_command, run_command_checked, trim_text_middle
 from utils.console import ask_yes_no
@@ -55,7 +55,7 @@ def ensure_clean_worktree(path: str) -> None:
         raise RuntimeError("Merge in progress detected (.git/MERGE_HEAD exists). Resolve/abort it first.")
 
 
-def checkout_update_base_branch(repo_path: str) -> None:
+def checkout_update_base_branch(repo_path: str, base_branch: str) -> None:
     run_command_checked(
         ["git", "fetch", "--all", "--prune"],
         cwd=repo_path,
@@ -69,40 +69,42 @@ def checkout_update_base_branch(repo_path: str) -> None:
         context="fetch tags",
     )
     run_command_checked(
-        ["git", "checkout", DEFAULT_BASE_BRANCH],
+        ["git", "checkout", base_branch],
         cwd=repo_path,
-        context=f"checkout {DEFAULT_BASE_BRANCH}",
+        context=f"checkout {base_branch}",
     )
     run_command_checked(
-        ["git", "pull", "--ff-only", DEFAULT_REMOTE, DEFAULT_BASE_BRANCH],
+        ["git", "pull", "--ff-only", DEFAULT_REMOTE, base_branch],
         cwd=repo_path,
-        context=f"pull {DEFAULT_REMOTE}/{DEFAULT_BASE_BRANCH}",
+        context=f"pull {DEFAULT_REMOTE}/{base_branch}",
     )
 
 
-def repo_has_branch_diff(path: str) -> bool:
-    # Fetch remote refs
-    run_command(["git", "fetch", DEFAULT_REMOTE], cwd=path, silent=True)
+def resolve_merge_base_branch(path: str) -> tuple[str | None, str]:
+    run_command(["git", "fetch", DEFAULT_REMOTE, "--prune"], cwd=path, silent=True)
+    return resolve_repo_base_branch(path, DEFAULT_REMOTE)
 
+
+def repo_has_branch_diff(path: str, base_branch: str) -> bool:
     base_commit = run_git_command(
         path,
-        ["merge-base", f"{DEFAULT_REMOTE}/{DEFAULT_BASE_BRANCH}", f"{DEFAULT_REMOTE}/{DEFAULT_HEAD_BRANCH}"],
+        ["merge-base", f"{DEFAULT_REMOTE}/{base_branch}", f"{DEFAULT_REMOTE}/{DEFAULT_HEAD_BRANCH}"],
     )
     head_commit = run_git_command(path, ["rev-parse", f"{DEFAULT_REMOTE}/{DEFAULT_HEAD_BRANCH}"])
 
     return bool(base_commit) and bool(head_commit) and base_commit != head_commit
 
 
-def get_commit_summary(path: str) -> str:
+def get_commit_summary(path: str, base_branch: str) -> str:
     return run_git_command(
         path,
-        ["log", f"{DEFAULT_REMOTE}/{DEFAULT_BASE_BRANCH}..{DEFAULT_REMOTE}/{DEFAULT_HEAD_BRANCH}", "--pretty=format:- %s"],
+        ["log", f"{DEFAULT_REMOTE}/{base_branch}..{DEFAULT_REMOTE}/{DEFAULT_HEAD_BRANCH}", "--pretty=format:- %s"],
     )
 
 
 # ---------------- GitHub CLI helpers ----------------
 
-def existing_pr_number(path: str) -> str:
+def existing_pr_number(path: str, base_branch: str) -> str:
     """
     Returns PR number if a PR already exists for base=head pair, else "".
     """
@@ -112,7 +114,7 @@ def existing_pr_number(path: str) -> str:
             "pr",
             "list",
             "--base",
-            DEFAULT_BASE_BRANCH,
+            base_branch,
             "--head",
             DEFAULT_HEAD_BRANCH,
             "--json",
@@ -315,7 +317,11 @@ def extract_plain_pr(raw: str) -> tuple[str | None, str | None]:
     return title, body
 
 
-def generate_pr_text_with_ollama(repo_name: str, commit_summary: str) -> tuple[str | None, str | None]:
+def generate_pr_text_with_ollama(
+    repo_name: str,
+    commit_summary: str,
+    base_branch: str,
+) -> tuple[str | None, str | None]:
     """
     Returns (title, body) if success, else (None, None).
     """
@@ -327,7 +333,7 @@ def generate_pr_text_with_ollama(repo_name: str, commit_summary: str) -> tuple[s
 
     pr_user = PR_USER_TEMPLATE.format(
         repo=repo_name,
-        base=DEFAULT_BASE_BRANCH,
+        base=base_branch,
         head=DEFAULT_HEAD_BRANCH,
         commit_summary=commit_summary_trimmed,
     )
@@ -402,7 +408,7 @@ def generate_pr_text_with_ollama(repo_name: str, commit_summary: str) -> tuple[s
 
 # ---------------- Main PR flow ----------------
 
-def create_and_merge_pr(path: str, repo_name: str) -> None:
+def create_and_merge_pr(path: str, repo_name: str, base_branch: str | None = None) -> None:
     # Safety first
     try:
         ensure_clean_worktree(path)
@@ -410,23 +416,29 @@ def create_and_merge_pr(path: str, repo_name: str) -> None:
         print(f"❌ {repo_name}: {e}")
         return
 
+    if not base_branch:
+        base_branch, resolution = resolve_merge_base_branch(path)
+        if not base_branch:
+            print(f"⚠️  {repo_name}: {resolution}.")
+            return
+
     # Debug: show current branch (we *do not* depend on it anymore)
     current = get_current_branch(path)
     if current:
         print(f"🔎 Current branch (info only): [bold]{current}[/]")
 
     date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    commit_summary = get_commit_summary(path)
+    commit_summary = get_commit_summary(path, base_branch)
 
     if not commit_summary:
         print("⚠️  No new commits found to merge.")
         return
 
     # Fallback PR text
-    fallback_title = f"🔀 chore: merge {DEFAULT_HEAD_BRANCH} into {DEFAULT_BASE_BRANCH} ({date_str})"
+    fallback_title = f"🔀 chore: merge {DEFAULT_HEAD_BRANCH} into {base_branch} ({date_str})"
     fallback_body = f"""## 📦 Merge Summary
 
-This pull request merges the latest validated commits from `{DEFAULT_HEAD_BRANCH}` into `{DEFAULT_BASE_BRANCH}`.
+This pull request merges the latest validated commits from `{DEFAULT_HEAD_BRANCH}` into `{base_branch}`.
 
 ---
 
@@ -442,7 +454,7 @@ _Auto-generated on {date_str}_
     # Try Ollama
     title, body = None, None
     try:
-        title, body = generate_pr_text_with_ollama(repo_name, commit_summary)
+        title, body = generate_pr_text_with_ollama(repo_name, commit_summary, base_branch)
     except OllamaError as e:
         print(f"⚠️  Ollama unavailable for PR text, fallback used. Reason: {e}")
 
@@ -450,7 +462,7 @@ _Auto-generated on {date_str}_
     body = body or fallback_body
 
     # Check existing PR
-    pr_number = existing_pr_number(path)
+    pr_number = existing_pr_number(path, base_branch)
     created_pr_url = None
 
     if pr_number:
@@ -469,7 +481,7 @@ _Auto-generated on {date_str}_
         if is_dry_run():
             print(
                 f"🧪 Dry-run: would create a pull request from {DEFAULT_HEAD_BRANCH} "
-                f"to {DEFAULT_BASE_BRANCH} and enable auto-merge for {repo_name}."
+                f"to {base_branch} and enable auto-merge for {repo_name}."
             )
             return
 
@@ -477,7 +489,7 @@ _Auto-generated on {date_str}_
             result = run_command(
                 [
                     "gh", "pr", "create",
-                    "--base", DEFAULT_BASE_BRANCH,
+                    "--base", base_branch,
                     "--head", DEFAULT_HEAD_BRANCH,
                     "--title", title,
                     "--body", body,
@@ -525,14 +537,14 @@ _Auto-generated on {date_str}_
 
     # Refresh local base branch and tag the release
     try:
-        checkout_update_base_branch(path)
+        checkout_update_base_branch(path, base_branch)
         tag_release_interactive(path, repo_name, commit_summary)
     except Exception as e:
         print(f"⚠️  Tagging step failed/skipped for {repo_name}: {e}")
 
 
 def main(root_dirs: list[str] = ROOT_DIRS) -> None:
-    print(f"\n🔄 Scanning for repos with pending {DEFAULT_HEAD_BRANCH} → {DEFAULT_BASE_BRANCH} merges\n")
+    print(f"\n🔄 Scanning for repos with pending {DEFAULT_HEAD_BRANCH} → base branch merges\n")
 
     for root_dir in root_dirs:
         console.print(f"\n📂 [bold yellow]Scanning root directory:[/] {root_dir}\n")
@@ -544,11 +556,16 @@ def main(root_dirs: list[str] = ROOT_DIRS) -> None:
         found_repos = False
         for repo, path in iter_git_repositories(root_dir):
             found_repos = True
-            if repo_has_branch_diff(path):
-                print(f"📦 [bold green]Found pending merge for {repo}[/]")
-                create_and_merge_pr(path, repo)
+            base_branch, resolution = resolve_merge_base_branch(path)
+            if not base_branch:
+                print(f"⚠️  {repo}: {resolution}.")
+                continue
+
+            if repo_has_branch_diff(path, base_branch):
+                print(f"📦 [bold green]Found pending merge for {repo}[/]: {DEFAULT_HEAD_BRANCH} → {base_branch}")
+                create_and_merge_pr(path, repo, base_branch)
             else:
-                print(f"✔️  [bold dark_orange]{repo}[/]: {DEFAULT_HEAD_BRANCH} is up to date with {DEFAULT_BASE_BRANCH}.")
+                print(f"✔️  [bold dark_orange]{repo}[/]: {DEFAULT_HEAD_BRANCH} is up to date with {base_branch}.")
 
         if not found_repos:
             print(f"⚠️  No repositories found in {root_dir}")

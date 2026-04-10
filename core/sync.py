@@ -2,7 +2,7 @@
 
 import os
 
-from core.config import DEFAULT_REMOTE, ROOT_DIRS
+from core.config import DEFAULT_REMOTE, ROOT_DIRS, describe_base_branch_strategy, resolve_repo_base_branch
 from core.repositories import iter_git_repositories
 from rich.console import Console
 from utils.common import is_dry_run, run_command
@@ -28,18 +28,6 @@ def fetch(repo_path: str, repo_name: str) -> bool:
         console.print(f"❌ [red]{repo_name}[/]: fetch failed:\n{(res.stderr or '').strip()}")
         return False
     return True
-
-
-def get_default_remote_branch(repo_path: str) -> str | None:
-    """
-    Returns default branch name from origin/HEAD (e.g. 'main' or 'master').
-    Requires fetch to be done before in many cases.
-    """
-    # Typical output: "refs/remotes/origin/main"
-    ref = git_output(repo_path, ["symbolic-ref", f"refs/remotes/{REMOTE}/HEAD"])
-    if ref.startswith(f"refs/remotes/{REMOTE}/"):
-        return ref.split(f"refs/remotes/{REMOTE}/", 1)[1].strip() or None
-    return None
 
 
 def ensure_local_branch_exists(repo_path: str, repo_name: str, branch: str) -> str:
@@ -112,6 +100,11 @@ def pull_ff_only(repo_path: str, repo_name: str, branch: str) -> str:
     return "pulled"
 
 
+def describe_sync_plan() -> str:
+    strategy = describe_base_branch_strategy(REMOTE)
+    return f"Checkout and pull each repo base branch from {REMOTE}? Strategy: {strategy}."
+
+
 def sync_default_branch(repo_path: str, repo_name: str) -> None:
     if not repo_is_clean(repo_path):
         console.print(f"⚠️  [yellow]{repo_name}[/]: repo not clean, skip sync (stash/commit first).")
@@ -120,9 +113,9 @@ def sync_default_branch(repo_path: str, repo_name: str) -> None:
     if not fetch(repo_path, repo_name):
         return
 
-    default_branch = get_default_remote_branch(repo_path)
+    default_branch, resolution = resolve_repo_base_branch(repo_path, REMOTE)
     if not default_branch:
-        console.print(f"⚠️  [yellow]{repo_name}[/]: could not resolve {REMOTE}/HEAD default branch. Skip.")
+        console.print(f"⚠️  [yellow]{repo_name}[/]: {resolution}. Skip.")
         return
 
     # Ensure local branch exists (some repos only have main locally or nothing checked out)
