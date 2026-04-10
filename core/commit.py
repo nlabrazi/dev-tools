@@ -6,7 +6,7 @@ from rich.console import Console
 
 from utils.common import env_int, run_command, trim_text_middle
 from utils.console import ask_yes_no
-from core.config import DEFAULT_HEAD_BRANCH, ROOT_DIRS
+from core.config import DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE, ROOT_DIRS
 from core.repositories import iter_git_repositories
 from core.ollama import chat_json, OllamaError
 from core.prompts import COMMIT_SYSTEM, COMMIT_USER_TEMPLATE
@@ -73,6 +73,7 @@ def extract_plain_commit(raw: str) -> str | None:
         return f"{header}\n\n" + "\n".join(body_lines)
     return header
 
+
 def is_comment_line(line: str) -> bool:
     stripped = line.lstrip()
     return (
@@ -93,6 +94,40 @@ def git_status_porcelain(path: str) -> list[str]:
     out = run_command(["git", "status", "--porcelain"], cwd=path).stdout or ""
     lines = [l.rstrip("\n") for l in out.splitlines() if l.strip()]
     return lines
+
+
+def get_current_branch(path: str) -> str:
+    return (run_command(["git", "branch", "--show-current"], cwd=path, silent=True).stdout or "").strip()
+
+
+def resolve_auto_commit_target(path: str) -> tuple[str, str] | None:
+    target_branch = (DEFAULT_HEAD_BRANCH or "").strip()
+    target_remote = (DEFAULT_REMOTE or "").strip()
+
+    if not target_branch:
+        print("❌ Auto-commit target branch is empty. Check DEVTOOLS_HEAD_BRANCH.")
+        return None
+    if not target_remote:
+        print("❌ Auto-commit remote is empty. Check DEVTOOLS_REMOTE.")
+        return None
+
+    current_branch = get_current_branch(path)
+    if not current_branch:
+        print("❌ Could not resolve the current branch. Auto-commit skipped.")
+        return None
+    if current_branch != target_branch:
+        print(
+            f"⚠️ Auto-commit expects branch '{target_branch}', current branch is '{current_branch}'. "
+            "Repo skipped to avoid committing on one branch and pushing another."
+        )
+        return None
+
+    remote_check = run_command(["git", "remote", "get-url", target_remote], cwd=path, silent=True)
+    if remote_check.returncode != 0:
+        print(f"❌ Remote '{target_remote}' is not configured for this repo. Auto-commit skipped.")
+        return None
+
+    return target_remote, target_branch
 
 
 def has_staged_changes(status_lines: list[str]) -> bool:
@@ -287,6 +322,15 @@ def commit_with_message(repo_path: str, full_message: str) -> bool:
     return True
 
 
+def push_head_to_branch(repo_path: str, remote: str, branch: str) -> bool:
+    refspec = f"HEAD:refs/heads/{branch}"
+    res = run_command(["git", "push", remote, refspec], cwd=repo_path)
+    if res.returncode != 0:
+        print(f"❌ git push failed:\n{(res.stderr or '').strip()}")
+        return False
+    return True
+
+
 def auto_commit_all_repos(root_dirs: list[str]):
     print(f"\n🔄 Scanning repos in: {', '.join(root_dirs)}\n")
     results = {"committed": 0, "pushed": 0}
@@ -313,6 +357,12 @@ def auto_commit_all_repos(root_dirs: list[str]):
             unstaged = has_unstaged_changes(status_lines)
 
             console.print(f"\n📦 Repo: [bold green]{repo}[/]")
+            target = resolve_auto_commit_target(repo_path)
+            if not target:
+                continue
+            target_remote, target_branch = target
+            print(f"🎯 Auto-commit target: {target_remote}/{target_branch}")
+
             if unstaged and not staged:
                 print("🟡 Changes detected but nothing staged yet.")
                 print("   Tip: we need staged changes to build commit message from --cached.")
@@ -371,15 +421,15 @@ def auto_commit_all_repos(root_dirs: list[str]):
 
             print("✅ Commit done.\n")
 
-            push_input = ask_yes_no(f"📤 Do you want to push to {DEFAULT_HEAD_BRANCH} ?", default="n")
+            push_input = ask_yes_no(
+                f"📤 Do you want to push current HEAD to {target_remote}/{target_branch} ?",
+                default="n",
+            )
             if push_input:
                 with console.status("[bold cyan]Pushing...[/]", spinner="dots"):
-                    res = run_command(["git", "push", "origin", DEFAULT_HEAD_BRANCH], cwd=repo_path)
-                    if res.returncode != 0:
-                        print(f"❌ git push failed:\n{(res.stderr or '').strip()}")
-                    else:
+                    if push_head_to_branch(repo_path, target_remote, target_branch):
                         results["pushed"] += 1
-                        print(f"🚀 Pushed to {DEFAULT_HEAD_BRANCH}\n")
+                        print(f"🚀 Pushed HEAD to {target_remote}/{target_branch}\n")
             else:
                 print("⏭️ Skipped git push")
 

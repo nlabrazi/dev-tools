@@ -1,6 +1,14 @@
 import os
 
 
+def _env_name(name: str, default: str) -> str:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    return value or default
+
+
 def _resolve_root_dirs() -> list[str]:
     raw = os.getenv("DEVTOOLS_ROOT_DIRS", "").strip()
     if raw:
@@ -18,7 +26,7 @@ def _resolve_root_dirs() -> list[str]:
 
 
 ROOT_DIRS = _resolve_root_dirs()
-DEFAULT_REMOTE = os.getenv("DEVTOOLS_REMOTE", "origin")
-DEFAULT_BASE_BRANCH = os.getenv("DEVTOOLS_BASE_BRANCH", "master")
-DEFAULT_HEAD_BRANCH = os.getenv("DEVTOOLS_HEAD_BRANCH", "staging")
+DEFAULT_REMOTE = _env_name("DEVTOOLS_REMOTE", "origin")
+DEFAULT_BASE_BRANCH = _env_name("DEVTOOLS_BASE_BRANCH", "master")
+DEFAULT_HEAD_BRANCH = _env_name("DEVTOOLS_HEAD_BRANCH", "staging")
 CHANGELOG_FILENAME = "CHANGELOG.md"
