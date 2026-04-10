@@ -1,6 +1,7 @@
 # core/versioning.py
 import re
 from dataclasses import dataclass
+from typing import Iterable
 
 from core.config import DEFAULT_REMOTE
 from core.conventional_commits import determine_bump_from_messages
@@ -66,6 +67,15 @@ def determine_bump_from_commits(commit_subjects: str) -> str:
 
     lines = [line.strip() for line in commit_subjects.splitlines() if line.strip()]
     return determine_bump_from_messages(lines)
+
+
+def compute_next_version_from_messages(
+    repo_path: str,
+    messages: Iterable[str],
+    default_first: str = "v0.1.0",
+) -> str:
+    bump_kind = determine_bump_from_messages(message for message in messages if isinstance(message, str))
+    return compute_next_version(repo_path, bump_kind, default_first=default_first)
 
 
 def compute_next_version(repo_path: str, bump_kind: str, default_first: str = "v0.1.0") -> str:
