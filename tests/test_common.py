@@ -1,4 +1,5 @@
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,7 @@ from unittest.mock import patch
 from utils.common import (
     CommandTimedOutError,
     DryRunBlockedError,
+    describe_command_failure,
     is_dry_run,
     is_timeout_result,
     prepend_text_file,
@@ -99,6 +101,47 @@ class DryRunTests(unittest.TestCase):
 
         with patch("utils.common.subprocess.run", side_effect=timeout_error), self.assertRaises(CommandTimedOutError):
             run_command_checked(["git", "status"], cwd="/tmp/repo", context="git status", timeout=3)
+
+    def test_run_command_limits_large_stdout_without_loading_full_result(self) -> None:
+        result = run_command(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.write('A' * 6000)",
+            ],
+            max_output_chars=240,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("[truncated]", result.stdout)
+        self.assertLessEqual(len(result.stdout), 240)
+
+    def test_run_command_checked_trims_large_failure_details(self) -> None:
+        failed = subprocess.CompletedProcess(
+            args=["git", "diff"],
+            returncode=1,
+            stdout="",
+            stderr="fatal: " + ("x" * 5000),
+        )
+
+        with patch("utils.common.run_command", return_value=failed), self.assertRaises(RuntimeError) as ctx:
+            run_command_checked(["git", "diff"], cwd="/tmp/repo", context="collect diff")
+
+        self.assertIn("collect diff failed:", str(ctx.exception))
+        self.assertIn("[truncated]", str(ctx.exception))
+
+    def test_describe_command_failure_strips_timeout_marker(self) -> None:
+        timed_out = subprocess.CompletedProcess(
+            args=["git", "diff"],
+            returncode=124,
+            stdout="",
+            stderr="COMMAND_TIMEOUT: command timed out after 3s\npartial stderr",
+        )
+
+        details = describe_command_failure(timed_out)
+
+        self.assertFalse(details.startswith("COMMAND_TIMEOUT:"))
+        self.assertIn("command timed out after 3s", details)
 
     def test_prepend_text_file_is_blocked_in_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

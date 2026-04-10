@@ -1,13 +1,19 @@
 # utils/common.py
 
+import codecs
 import os
 from pathlib import Path
+import selectors
 import subprocess
+import time
 from typing import List, Optional, Union
 
 DRY_RUN = False
 _TIMEOUT_RESULT_RC = 124
 _TIMEOUT_MARKER = "COMMAND_TIMEOUT:"
+_TRUNCATION_MARKER = "\n\n... [truncated] ...\n\n"
+_STREAM_CHUNK_SIZE = 8192
+_FAILURE_DETAILS_MAX_CHARS = 1600
 
 # Commands that are safe to execute even in dry-run (read-only)
 _SAFE_PREFIXES: list[list[str]] = [
@@ -123,6 +129,173 @@ def _normalize_output(value: object, text: bool) -> str | bytes:
     return bytes(str(value), encoding="utf-8", errors="replace")
 
 
+def _output_to_text(value: object) -> str:
+    normalized = _normalize_output(value, text=True)
+    return normalized if isinstance(normalized, str) else normalized.decode("utf-8", errors="replace")
+
+
+class _BoundedTextCollector:
+    def __init__(self, max_chars: int) -> None:
+        self.max_chars = max_chars
+        self.total_chars = 0
+        self._full_parts: list[str] = []
+        self._head_parts: list[str] = []
+        self._head_chars = 0
+        self._tail = ""
+        self._truncated = False
+
+        if max_chars <= len(_TRUNCATION_MARKER) + 50:
+            self._head_budget = max_chars
+            self._tail_budget = 0
+        else:
+            self._head_budget = int(max_chars * 0.7)
+            self._tail_budget = max_chars - self._head_budget - len(_TRUNCATION_MARKER)
+            if self._tail_budget < 0:
+                self._tail_budget = 0
+
+    def append(self, text: str) -> None:
+        if not text:
+            return
+
+        if not self._truncated:
+            projected = self.total_chars + len(text)
+            if projected <= self.max_chars:
+                self._full_parts.append(text)
+                self.total_chars = projected
+                return
+
+            combined = "".join(self._full_parts) + text
+            self._full_parts = []
+            self._truncated = True
+            self.total_chars = projected
+            self._append_bounded(combined)
+            return
+
+        self.total_chars += len(text)
+        self._append_bounded(text)
+
+    def _append_bounded(self, text: str) -> None:
+        if self._head_chars < self._head_budget:
+            remaining_head = self._head_budget - self._head_chars
+            head_chunk = text[:remaining_head]
+            if head_chunk:
+                self._head_parts.append(head_chunk)
+                self._head_chars += len(head_chunk)
+
+        if self._tail_budget > 0:
+            self._tail = (self._tail + text)[-self._tail_budget :]
+
+    def get_value(self) -> str:
+        if not self._truncated:
+            return "".join(self._full_parts)
+
+        head = "".join(self._head_parts)
+        if self._tail_budget <= 0:
+            return head[: self.max_chars]
+        return f"{head}{_TRUNCATION_MARKER}{self._tail}"
+
+
+def _run_command_bounded(
+    command_list: list[str],
+    cwd: Optional[str],
+    timeout: float | None,
+    max_output_chars: int,
+) -> subprocess.CompletedProcess:
+    process = subprocess.Popen(
+        command_list,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    collectors = {
+        "stdout": _BoundedTextCollector(max_output_chars),
+        "stderr": _BoundedTextCollector(max_output_chars),
+    }
+    decoders = {
+        "stdout": codecs.getincrementaldecoder("utf-8")(errors="replace"),
+        "stderr": codecs.getincrementaldecoder("utf-8")(errors="replace"),
+    }
+
+    selector = selectors.DefaultSelector()
+    if process.stdout is not None:
+        selector.register(process.stdout, selectors.EVENT_READ, data="stdout")
+    if process.stderr is not None:
+        selector.register(process.stderr, selectors.EVENT_READ, data="stderr")
+
+    deadline = None if timeout is None else time.monotonic() + timeout
+    timed_out = False
+
+    while selector.get_map():
+        wait_timeout = 0.1
+        if deadline is None:
+            wait_timeout = 0.1
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                process.kill()
+                timed_out = True
+                deadline = None
+                wait_timeout = 0.1
+            else:
+                wait_timeout = min(remaining, 0.1)
+
+        events = selector.select(wait_timeout)
+        if not events:
+            if process.poll() is not None and deadline is None:
+                deadline = None
+            continue
+
+        for key, _ in events:
+            stream = key.fileobj
+            chunk = stream.read1(_STREAM_CHUNK_SIZE)
+            if not chunk:
+                selector.unregister(stream)
+                stream_name = key.data
+                trailing = decoders[stream_name].decode(b"", final=True)
+                collectors[stream_name].append(trailing)
+                stream.close()
+                continue
+
+            decoded = decoders[key.data].decode(chunk, final=False)
+            collectors[key.data].append(decoded)
+
+    returncode = process.wait()
+    stdout = collectors["stdout"].get_value()
+    stderr = collectors["stderr"].get_value()
+
+    if timed_out:
+        timeout_error = subprocess.TimeoutExpired(
+            cmd=command_list,
+            timeout=timeout if timeout is not None else 0,
+            output=stdout,
+            stderr=stderr,
+        )
+        return _timeout_result(command_list, timeout_error, text=True, timeout=timeout)
+
+    return subprocess.CompletedProcess(
+        args=command_list,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def describe_command_failure(
+    result: subprocess.CompletedProcess,
+    *,
+    max_chars: int = _FAILURE_DETAILS_MAX_CHARS,
+) -> str:
+    stderr_text = _output_to_text(result.stderr).strip()
+    stdout_text = _output_to_text(result.stdout).strip()
+
+    details = stderr_text or stdout_text or f"exit code {result.returncode}"
+    if details.startswith(_TIMEOUT_MARKER):
+        details = details.replace(_TIMEOUT_MARKER, "", 1).strip() or "command timed out"
+
+    return trim_text_middle(details, max_chars)
+
+
 def _timeout_result(
     command_list: list[str],
     error: subprocess.TimeoutExpired,
@@ -160,6 +333,7 @@ def run_command(
     silent: bool = False,
     text: bool = True,
     timeout: float | None = None,
+    max_output_chars: int | None = None,
 ) -> subprocess.CompletedProcess:
     """
     Execute a command and return a CompletedProcess with stdout/stderr always available.
@@ -173,6 +347,9 @@ def run_command(
     else:
         command_list = command
 
+    if max_output_chars is not None and text is False:
+        raise ValueError("max_output_chars requires text=True")
+
     cmd_str = " ".join(command_list)
 
     # DRY-RUN handling
@@ -182,6 +359,8 @@ def run_command(
             if not silent:
                 print(f"🧪 [DRY-RUN/READ] Executing: {cmd_str} in {cwd}")
             try:
+                if max_output_chars is not None:
+                    return _run_command_bounded(command_list, cwd, timeout, max_output_chars)
                 return subprocess.run(
                     command_list,
                     cwd=cwd,
@@ -204,6 +383,8 @@ def run_command(
 
     # Normal execution: ALWAYS capture output so callers can debug on failure
     try:
+        if max_output_chars is not None:
+            return _run_command_bounded(command_list, cwd, timeout, max_output_chars)
         result = subprocess.run(
             command_list,
             cwd=cwd,
@@ -225,8 +406,16 @@ def run_command_checked(
     text: bool = True,
     context: Optional[str] = None,
     timeout: float | None = None,
+    max_output_chars: int | None = None,
 ) -> subprocess.CompletedProcess:
-    result = run_command(command, cwd=cwd, silent=silent, text=text, timeout=timeout)
+    result = run_command(
+        command,
+        cwd=cwd,
+        silent=silent,
+        text=text,
+        timeout=timeout,
+        max_output_chars=max_output_chars,
+    )
     if result.returncode == 0:
         return result
 
@@ -244,15 +433,10 @@ def run_command_checked(
         else:
             command_label = " ".join(command)
         action = context or command_label
-        raw_stderr = result.stderr or ""
-        if isinstance(raw_stderr, bytes):
-            stderr_text = raw_stderr.decode("utf-8", errors="replace")
-        else:
-            stderr_text = raw_stderr
-        details = stderr_text.replace(_TIMEOUT_MARKER, "", 1).strip() or "command timed out"
+        details = describe_command_failure(result)
         raise CommandTimedOutError(action, command, details)
 
-    details = ((result.stderr or "").strip() or (result.stdout or "").strip() or f"exit code {result.returncode}")
+    details = describe_command_failure(result)
     if isinstance(command, str):
         command_label = command
     else:
@@ -277,7 +461,7 @@ def trim_text_middle(text: str, max_chars: int) -> str:
     if max_chars <= 0 or len(text) <= max_chars:
         return text
 
-    marker = "\n\n... [truncated for model context] ...\n\n"
+    marker = _TRUNCATION_MARKER
     if max_chars <= len(marker) + 50:
         return text[:max_chars]
 

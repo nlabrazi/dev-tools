@@ -1,29 +1,56 @@
 import os
 from rich.console import Console
 
-from utils.common import is_dry_run, run_command
+from utils.common import describe_command_failure, env_int, is_dry_run
 from utils.console import ask_yes_no
+from utils.git import git_command, git_output
 from core.config import DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE, ROOT_DIRS
 from core.commit_message import generate_commit_message
 from core.repositories import iter_git_repositories
 
 console = Console()
+DEFAULT_COMMIT_DIFF_MAX_CHARS = 4500
 
 
-def git_status_porcelain(path: str) -> list[str]:
+def get_commit_diff_max_chars() -> int:
+    return env_int("OLLAMA_MAX_DIFF_CHARS", DEFAULT_COMMIT_DIFF_MAX_CHARS, minimum=800)
+
+
+def _git_output_or_report(
+    path: str,
+    args: list[str],
+    *,
+    context: str,
+    max_output_chars: int | None = None,
+) -> str | None:
+    result = git_command(
+        path,
+        args,
+        silent=True,
+        max_output_chars=max_output_chars,
+    )
+    if result.returncode != 0:
+        print(f"❌ {context} failed:\n{describe_command_failure(result)}")
+        return None
+    return (result.stdout or "").rstrip("\n")
+
+
+def git_status_porcelain(path: str) -> list[str] | None:
     """
     Returns lines like:
       ' M file.txt' (unstaged)
       'M  file.txt' (staged)
       '?? file.txt' (untracked)
     """
-    out = run_command(["git", "status", "--porcelain"], cwd=path).stdout or ""
+    out = _git_output_or_report(path, ["status", "--porcelain"], context="git status --porcelain")
+    if out is None:
+        return None
     lines = [l.rstrip("\n") for l in out.splitlines() if l.strip()]
     return lines
 
 
 def get_current_branch(path: str) -> str:
-    return (run_command(["git", "branch", "--show-current"], cwd=path, silent=True).stdout or "").strip()
+    return git_output(path, ["branch", "--show-current"])
 
 
 def resolve_auto_commit_target(path: str) -> tuple[str, str] | None:
@@ -48,7 +75,7 @@ def resolve_auto_commit_target(path: str) -> tuple[str, str] | None:
         )
         return None
 
-    remote_check = run_command(["git", "remote", "get-url", target_remote], cwd=path, silent=True)
+    remote_check = git_command(path, ["remote", "get-url", target_remote], silent=True)
     if remote_check.returncode != 0:
         print(f"❌ Remote '{target_remote}' is not configured for this repo. Auto-commit skipped.")
         return None
@@ -76,21 +103,35 @@ def has_unstaged_changes(status_lines: list[str]) -> bool:
     return False
 
 
-def get_diff_content_cached(path: str) -> str:
-    return (run_command(["git", "diff", "--cached"], cwd=path).stdout or "").strip()
+def get_diff_content_cached(path: str) -> str | None:
+    return _git_output_or_report(
+        path,
+        ["diff", "--cached", "--no-ext-diff"],
+        context="git diff --cached",
+        max_output_chars=get_commit_diff_max_chars(),
+    )
 
 
-def get_diff_content_worktree(path: str) -> str:
-    return (run_command(["git", "diff"], cwd=path).stdout or "").strip()
+def get_diff_content_worktree(path: str) -> str | None:
+    return _git_output_or_report(
+        path,
+        ["diff", "--no-ext-diff"],
+        context="git diff",
+        max_output_chars=get_commit_diff_max_chars(),
+    )
 
 
-def get_modified_files_names_cached(path: str) -> list[str]:
-    out = (run_command(["git", "diff", "--cached", "--name-only"], cwd=path).stdout or "").strip()
+def get_modified_files_names_cached(path: str) -> list[str] | None:
+    out = _git_output_or_report(path, ["diff", "--cached", "--name-only"], context="git diff --cached --name-only")
+    if out is None:
+        return None
     return out.splitlines() if out else []
 
 
-def get_modified_files_names_worktree(path: str) -> list[str]:
-    out = (run_command(["git", "diff", "--name-only"], cwd=path).stdout or "").strip()
+def get_modified_files_names_worktree(path: str) -> list[str] | None:
+    out = _git_output_or_report(path, ["diff", "--name-only"], context="git diff --name-only")
+    if out is None:
+        return None
     return out.splitlines() if out else []
 
 
@@ -115,9 +156,9 @@ def commit_with_message(repo_path: str, full_message: str) -> str:
     if body:
         cmd += ["-m", body]
 
-    res = run_command(cmd, cwd=repo_path)
+    res = git_command(repo_path, cmd[1:])
     if res.returncode != 0:
-        print(f"❌ git commit failed:\n{(res.stderr or '').strip()}")
+        print(f"❌ git commit failed:\n{describe_command_failure(res)}")
         return "failed"
     return "committed"
 
@@ -128,9 +169,9 @@ def push_head_to_branch(repo_path: str, remote: str, branch: str) -> str:
         return "dry-run"
 
     refspec = f"HEAD:refs/heads/{branch}"
-    res = run_command(["git", "push", remote, refspec], cwd=repo_path)
+    res = git_command(repo_path, ["push", remote, refspec])
     if res.returncode != 0:
-        print(f"❌ git push failed:\n{(res.stderr or '').strip()}")
+        print(f"❌ git push failed:\n{describe_command_failure(res)}")
         return "failed"
     return "pushed"
 
@@ -153,6 +194,8 @@ def auto_commit_all_repos(root_dirs: list[str]):
 
             # 1) Status first (key fix)
             status_lines = git_status_porcelain(repo_path)
+            if status_lines is None:
+                continue
 
             if not status_lines:
                 print(f"⚪ {repo}: Clean working tree")
@@ -178,9 +221,9 @@ def auto_commit_all_repos(root_dirs: list[str]):
                         print("🧪 Dry-run: would stage all changes with git add -A.")
                         use_worktree_diff = True
                     else:
-                        add_result = run_command(["git", "add", "-A"], cwd=repo_path)
+                        add_result = git_command(repo_path, ["add", "-A"])
                         if add_result.returncode != 0:
-                            print(f"❌ git add failed:\n{(add_result.stderr or '').strip()}")
+                            print(f"❌ git add failed:\n{describe_command_failure(add_result)}")
                             continue
                     staged = True
                 else:
@@ -193,6 +236,8 @@ def auto_commit_all_repos(root_dirs: list[str]):
 
             # 2) Now we can read cached diff
             diff_content = get_diff_content_worktree(repo_path) if use_worktree_diff else get_diff_content_cached(repo_path)
+            if diff_content is None:
+                continue
             if not diff_content:
                 print(f"⚪ {repo}: No staged diff to commit")
                 continue
@@ -202,6 +247,8 @@ def auto_commit_all_repos(root_dirs: list[str]):
                 if use_worktree_diff
                 else get_modified_files_names_cached(repo_path)
             )
+            if files is None:
+                continue
 
             # 3) Generate message (LLM first, heuristic fallback second)
             commit_message = generate_commit_message(repo, files, diff_content)
