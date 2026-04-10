@@ -23,9 +23,20 @@ class ConventionalCommit:
 
 
 def parse_conventional_commit(message: str) -> ConventionalCommit | None:
-    header = (message or "").splitlines()[0].strip()
+    if not isinstance(message, str):
+        return None
+
+    lines = message.splitlines()
+    if not lines:
+        return None
+
+    header = lines[0].strip()
+    if not header:
+        return None
     if header.startswith("- "):
         header = header[2:].strip()
+    if not header:
+        return None
 
     match = CONVENTIONAL_COMMIT_RE.match(header)
     if not match:

@@ -5,6 +5,11 @@ from core.versioning import determine_bump_from_commits, parse_semver
 
 
 class ConventionalCommitTests(unittest.TestCase):
+    def test_parse_conventional_commit_returns_none_for_empty_input(self) -> None:
+        self.assertIsNone(parse_conventional_commit(""))
+        self.assertIsNone(parse_conventional_commit("   "))
+        self.assertIsNone(parse_conventional_commit(None))  # type: ignore[arg-type]
+
     def test_parse_scoped_commit(self) -> None:
         parsed = parse_conventional_commit("feat(api): expose health endpoint")
 
@@ -29,6 +34,10 @@ class ConventionalCommitTests(unittest.TestCase):
         self.assertIsNotNone(parsed)
         assert parsed is not None
         self.assertEqual(parsed.normalized_type, "style")
+
+    def test_parse_conventional_commit_returns_none_for_invalid_header(self) -> None:
+        self.assertIsNone(parse_conventional_commit("- "))
+        self.assertIsNone(parse_conventional_commit("not a conventional commit"))
 
     def test_determine_bump_prefers_major(self) -> None:
         bump = determine_bump_from_messages(
