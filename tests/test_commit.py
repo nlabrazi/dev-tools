@@ -101,7 +101,7 @@ class AutoCommitWorkflowTests(unittest.TestCase):
             "core.commit.get_modified_files_names_cached",
             return_value=["file.py"],
         ), patch(
-            "core.commit.generate_commit_message_with_ollama",
+            "core.commit.generate_commit_message",
             return_value="feat: add feature",
         ), patch(
             "core.commit.ask_yes_no",
