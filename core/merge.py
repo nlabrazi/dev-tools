@@ -7,7 +7,8 @@ from rich.console import Console
 
 from core.config import DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE, ROOT_DIRS, resolve_repo_base_branch
 from core.repositories import iter_git_repositories
-from utils.common import env_int, is_dry_run, run_command, run_command_checked, trim_text_middle
+from utils.common import env_int, is_dry_run, run_command, trim_text_middle
+from utils.git import git_command, git_command_checked, git_output
 from utils.console import ask_yes_no
 from core.ollama import chat_json, OllamaError
 from core.prompts import PR_SYSTEM, PR_USER_TEMPLATE
@@ -22,31 +23,19 @@ from core.versioning import (
 console = Console()
 
 
-# ---------------- Git helpers ----------------
-
-def run_git_command(path: str, args: list[str]) -> str:
-    """
-    Run git command in repo path and return stdout stripped.
-    """
-    result = run_command(["git"] + args, cwd=path, silent=True)
-    if result.returncode != 0:
-        return ""
-    return (result.stdout or "").strip()
-
-
 def get_current_branch(path: str) -> str:
-    return run_git_command(path, ["branch", "--show-current"])
+    return git_output(path, ["branch", "--show-current"])
 
 
 def ensure_clean_worktree(path: str) -> None:
     """
     Ensure no pending changes and no merge in progress (avoid undefined state).
     """
-    status = run_git_command(path, ["status", "--porcelain"])
+    status = git_output(path, ["status", "--porcelain"])
     if status.strip():
         raise RuntimeError("Working tree is not clean (uncommitted changes detected).")
 
-    merge_head = run_git_command(path, ["rev-parse", "--git-path", "MERGE_HEAD"])
+    merge_head = git_output(path, ["rev-parse", "--git-path", "MERGE_HEAD"])
     if merge_head:
         merge_head_path = merge_head if os.path.isabs(merge_head) else os.path.join(path, merge_head)
     else:
@@ -56,47 +45,47 @@ def ensure_clean_worktree(path: str) -> None:
 
 
 def checkout_update_base_branch(repo_path: str, base_branch: str) -> None:
-    run_command_checked(
-        ["git", "fetch", "--all", "--prune"],
-        cwd=repo_path,
+    git_command_checked(
+        repo_path,
+        ["fetch", "--all", "--prune"],
         silent=True,
         context="fetch remote branches",
     )
-    run_command_checked(
-        ["git", "fetch", "--tags"],
-        cwd=repo_path,
+    git_command_checked(
+        repo_path,
+        ["fetch", "--tags"],
         silent=True,
         context="fetch tags",
     )
-    run_command_checked(
-        ["git", "checkout", base_branch],
-        cwd=repo_path,
+    git_command_checked(
+        repo_path,
+        ["checkout", base_branch],
         context=f"checkout {base_branch}",
     )
-    run_command_checked(
-        ["git", "pull", "--ff-only", DEFAULT_REMOTE, base_branch],
-        cwd=repo_path,
+    git_command_checked(
+        repo_path,
+        ["pull", "--ff-only", DEFAULT_REMOTE, base_branch],
         context=f"pull {DEFAULT_REMOTE}/{base_branch}",
     )
 
 
 def resolve_merge_base_branch(path: str) -> tuple[str | None, str]:
-    run_command(["git", "fetch", DEFAULT_REMOTE, "--prune"], cwd=path, silent=True)
+    git_command(path, ["fetch", DEFAULT_REMOTE, "--prune"], silent=True)
     return resolve_repo_base_branch(path, DEFAULT_REMOTE)
 
 
 def repo_has_branch_diff(path: str, base_branch: str) -> bool:
-    base_commit = run_git_command(
+    base_commit = git_output(
         path,
         ["merge-base", f"{DEFAULT_REMOTE}/{base_branch}", f"{DEFAULT_REMOTE}/{DEFAULT_HEAD_BRANCH}"],
     )
-    head_commit = run_git_command(path, ["rev-parse", f"{DEFAULT_REMOTE}/{DEFAULT_HEAD_BRANCH}"])
+    head_commit = git_output(path, ["rev-parse", f"{DEFAULT_REMOTE}/{DEFAULT_HEAD_BRANCH}"])
 
     return bool(base_commit) and bool(head_commit) and base_commit != head_commit
 
 
 def get_commit_summary(path: str, base_branch: str) -> str:
-    return run_git_command(
+    return git_output(
         path,
         ["log", f"{DEFAULT_REMOTE}/{base_branch}..{DEFAULT_REMOTE}/{DEFAULT_HEAD_BRANCH}", "--pretty=format:- %s"],
     )

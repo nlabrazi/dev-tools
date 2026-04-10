@@ -8,32 +8,32 @@ from core.sync import describe_sync_plan, ensure_local_branch_exists, pull_ff_on
 class SyncDryRunTests(unittest.TestCase):
     def test_ensure_local_branch_exists_returns_dry_run_when_branch_is_missing(self) -> None:
         missing_branch = subprocess.CompletedProcess(
-            args=["git", "show-ref", "--verify", "--quiet", "refs/heads/main"],
+            args=["show-ref", "--verify", "--quiet", "refs/heads/main"],
             returncode=1,
             stdout="",
             stderr="",
         )
-        with patch("core.sync.run_command", return_value=missing_branch) as run_command, patch(
+        with patch("core.sync.git_command", return_value=missing_branch) as git_command, patch(
             "core.sync.is_dry_run",
             return_value=True,
         ), patch("core.sync.console.print"):
             status = ensure_local_branch_exists("/tmp/repo", "repo", "main")
 
         self.assertEqual(status, "dry-run")
-        run_command.assert_called_once_with(
-            ["git", "show-ref", "--verify", "--quiet", "refs/heads/main"],
-            cwd="/tmp/repo",
+        git_command.assert_called_once_with(
+            "/tmp/repo",
+            ["show-ref", "--verify", "--quiet", "refs/heads/main"],
             silent=True,
         )
 
     def test_pull_ff_only_returns_dry_run_without_git_pull(self) -> None:
-        with patch("core.sync.is_dry_run", return_value=True), patch("core.sync.run_command") as run_command, patch(
+        with patch("core.sync.is_dry_run", return_value=True), patch("core.sync.git_command") as git_command, patch(
             "core.sync.console.print"
         ):
             status = pull_ff_only("/tmp/repo", "repo", "main")
 
         self.assertEqual(status, "dry-run")
-        run_command.assert_not_called()
+        git_command.assert_not_called()
 
     def test_describe_sync_plan_mentions_branch_strategy(self) -> None:
         with patch("core.sync.describe_base_branch_strategy", return_value="origin/HEAD default branch"):

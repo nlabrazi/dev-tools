@@ -5,25 +5,20 @@ import os
 from core.config import DEFAULT_REMOTE, ROOT_DIRS, describe_base_branch_strategy, resolve_repo_base_branch
 from core.repositories import iter_git_repositories
 from rich.console import Console
-from utils.common import is_dry_run, run_command
+from utils.common import is_dry_run
+from utils.git import git_command, git_output
 from utils.console import ask_yes_no
 
 console = Console()
 REMOTE = DEFAULT_REMOTE
 
-
-def git_output(repo_path: str, args: list[str]) -> str:
-    res = run_command(["git"] + args, cwd=repo_path, silent=True)
-    return (res.stdout or "").strip()
-
-
 def repo_is_clean(repo_path: str) -> bool:
-    res = run_command(["git", "status", "--porcelain"], cwd=repo_path, silent=True)
+    res = git_command(repo_path, ["status", "--porcelain"], silent=True)
     return (res.stdout or "").strip() == ""
 
 
 def fetch(repo_path: str, repo_name: str) -> bool:
-    res = run_command(["git", "fetch", "--all", "--prune"], cwd=repo_path, silent=True)
+    res = git_command(repo_path, ["fetch", "--all", "--prune"], silent=True)
     if res.returncode != 0:
         console.print(f"❌ [red]{repo_name}[/]: fetch failed:\n{(res.stderr or '').strip()}")
         return False
@@ -35,7 +30,7 @@ def ensure_local_branch_exists(repo_path: str, repo_name: str, branch: str) -> s
     Ensure local branch exists; if not, try to create it tracking origin/<branch>.
     """
     # Does local branch exist?
-    res = run_command(["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=repo_path, silent=True)
+    res = git_command(repo_path, ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], silent=True)
     if res.returncode == 0:
         return "ready"
 
@@ -46,7 +41,7 @@ def ensure_local_branch_exists(repo_path: str, repo_name: str, branch: str) -> s
         return "dry-run"
 
     # Create local branch tracking origin
-    res2 = run_command(["git", "checkout", "-b", branch, f"{REMOTE}/{branch}"], cwd=repo_path, silent=True)
+    res2 = git_command(repo_path, ["checkout", "-b", branch, f"{REMOTE}/{branch}"], silent=True)
     if res2.returncode != 0:
         return "failed"
     return "ready"
@@ -61,7 +56,7 @@ def checkout_branch(repo_path: str, repo_name: str, branch: str) -> str:
         console.print(f"🧪 [cyan]{repo_name}[/]: would checkout {branch}.")
         return "dry-run"
 
-    res = run_command(["git", "checkout", branch], cwd=repo_path, silent=True)
+    res = git_command(repo_path, ["checkout", branch], silent=True)
     if res.returncode != 0:
         console.print(f"❌ [red]{repo_name}[/]: checkout {branch} failed:\n{(res.stderr or '').strip()}")
         return "failed"
@@ -93,7 +88,7 @@ def pull_ff_only(repo_path: str, repo_name: str, branch: str) -> str:
         console.print(f"🧪 [cyan]{repo_name}[/]: would pull --ff-only {REMOTE}/{branch}.")
         return "dry-run"
 
-    res = run_command(["git", "pull", "--ff-only", REMOTE, branch], cwd=repo_path, silent=True)
+    res = git_command(repo_path, ["pull", "--ff-only", REMOTE, branch], silent=True)
     if res.returncode != 0:
         console.print(f"❌ [red]{repo_name}[/]: pull --ff-only failed:\n{(res.stderr or '').strip()}")
         return "failed"

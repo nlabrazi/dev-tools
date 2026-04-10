@@ -1,6 +1,6 @@
 import os
 
-from utils.common import run_command
+from utils.git import git_command, git_output
 
 LEGACY_BASE_BRANCH = "master"
 
@@ -57,16 +57,9 @@ def describe_base_branch_strategy(remote: str | None = None) -> str:
     return f"{remote_name}/HEAD default branch with legacy fallback '{LEGACY_BASE_BRANCH}'"
 
 
-def _git_output(repo_path: str, args: list[str]) -> str:
-    result = run_command(["git"] + args, cwd=repo_path, silent=True)
-    if result.returncode != 0:
-        return ""
-    return (result.stdout or "").strip()
-
-
 def get_default_remote_branch(repo_path: str, remote: str | None = None) -> str | None:
     remote_name = remote or DEFAULT_REMOTE
-    ref = _git_output(repo_path, ["symbolic-ref", f"refs/remotes/{remote_name}/HEAD"])
+    ref = git_output(repo_path, ["symbolic-ref", f"refs/remotes/{remote_name}/HEAD"])
     prefix = f"refs/remotes/{remote_name}/"
     if ref.startswith(prefix):
         branch = ref.split(prefix, 1)[1].strip()
@@ -78,9 +71,9 @@ def remote_branch_exists(repo_path: str, branch: str, remote: str | None = None)
     remote_name = remote or DEFAULT_REMOTE
     if not branch:
         return False
-    result = run_command(
-        ["git", "show-ref", "--verify", "--quiet", f"refs/remotes/{remote_name}/{branch}"],
-        cwd=repo_path,
+    result = git_command(
+        repo_path,
+        ["show-ref", "--verify", "--quiet", f"refs/remotes/{remote_name}/{branch}"],
         silent=True,
     )
     return result.returncode == 0
