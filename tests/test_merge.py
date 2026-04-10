@@ -2,10 +2,42 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from core.merge import create_and_merge_pr
+from core.merge import create_and_merge_pr, get_pr_status
 
 
 class MergeDryRunTests(unittest.TestCase):
+    def test_get_pr_status_parses_github_cli_json(self) -> None:
+        result = subprocess.CompletedProcess(
+            args=["gh", "pr", "view"],
+            returncode=0,
+            stdout='{"state":"MERGED","mergedAt":"2026-04-10T10:00:00Z","mergeStateStatus":"CLEAN","isDraft":false}',
+            stderr="",
+        )
+
+        with patch("core.merge.run_command", return_value=result) as run_command:
+            status = get_pr_status("/tmp/repo", "42")
+
+        self.assertEqual(
+            status,
+            {
+                "state": "MERGED",
+                "mergedAt": "2026-04-10T10:00:00Z",
+                "mergeStateStatus": "CLEAN",
+                "isDraft": False,
+            },
+        )
+        run_command.assert_called_once_with(
+            [
+                "gh",
+                "pr",
+                "view",
+                "42",
+                "--json",
+                "state,mergedAt,mergeStateStatus,isDraft",
+            ],
+            cwd="/tmp/repo",
+        )
+
     def test_create_and_merge_pr_dry_run_skips_pr_creation(self) -> None:
         with patch("core.merge.ensure_clean_worktree"), patch(
             "core.merge.resolve_merge_base_branch",

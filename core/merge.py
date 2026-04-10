@@ -5,6 +5,7 @@ from rich import print
 from rich.console import Console
 
 from core.config import DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE, ROOT_DIRS, resolve_repo_base_branch
+from core.formatters import safe_parse_json
 from core.pr_message import generate_pr_text
 from core.repositories import iter_git_repositories
 from utils.common import env_int, is_dry_run, run_command
