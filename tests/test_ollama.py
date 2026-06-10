@@ -3,10 +3,31 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
-from core.ollama import OllamaError, debug_log_output, ensure_repo_context_allowed, get_ollama_host
+from core.ollama import (
+    OllamaError,
+    debug_log_output,
+    ensure_repo_context_allowed,
+    get_ollama_host,
+    resolve_ollama_model,
+)
 
 
 class OllamaSecurityTests(unittest.TestCase):
+    def test_resolve_ollama_model_prefers_explicit_argument(self) -> None:
+        with patch.dict("os.environ", {"OLLAMA_MODEL": "deepseek-coder:6.7b"}, clear=True):
+            model = resolve_ollama_model("qwen3-coder:30b")
+
+        self.assertEqual(model, "qwen3-coder:30b")
+
+    def test_resolve_ollama_model_uses_environment_then_default(self) -> None:
+        with patch.dict("os.environ", {"OLLAMA_MODEL": "deepseek-coder-v2:16b"}, clear=True):
+            env_model = resolve_ollama_model()
+        with patch.dict("os.environ", {}, clear=True):
+            default_model = resolve_ollama_model()
+
+        self.assertEqual(env_model, "deepseek-coder-v2:16b")
+        self.assertEqual(default_model, "qwen3-coder:30b")
+
     def test_get_ollama_host_accepts_default_localhost(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
             host = get_ollama_host()

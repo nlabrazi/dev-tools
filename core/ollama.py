@@ -7,7 +7,7 @@ from urllib.parse import urlparse, urlunparse
 from utils.common import trim_text_middle
 
 DEFAULT_HOST = "http://localhost:11434"
-DEFAULT_MODEL = "llama3.2"
+DEFAULT_MODEL = "qwen3-coder:30b"
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_DEBUG_MAX_CHARS = 400
 LOCAL_HOSTNAMES = {"localhost", "127.0.0.1", "::1"}
@@ -75,6 +75,17 @@ def is_ollama_enabled() -> bool:
     return _env_flag("ENABLE_OLLAMA", default=True)
 
 
+def resolve_ollama_model(model: str | None = None) -> str:
+    if model:
+        return model
+
+    env_model = os.getenv("OLLAMA_MODEL")
+    if env_model and env_model.strip():
+        return env_model.strip()
+
+    return DEFAULT_MODEL
+
+
 def ensure_repo_context_allowed(context_label: str) -> None:
     host = get_ollama_host()
     hostname = urlparse(host).hostname
@@ -120,7 +131,7 @@ def chat_json(
     If json_mode=True, requests strict JSON output via Ollama "format":"json".
     """
     host = get_ollama_host()
-    model_name = model or os.getenv("OLLAMA_MODEL", DEFAULT_MODEL)
+    model_name = resolve_ollama_model(model)
     timeout = _resolve_timeout(os.getenv("OLLAMA_TIMEOUT", str(DEFAULT_TIMEOUT)))
 
     payload = {
@@ -156,9 +167,10 @@ def chat_json(
             details = e.read().decode("utf-8", errors="replace").strip()
         except Exception:
             details = ""
+        model_hint = f" (resolved model: {model_name})"
         if details:
-            raise OllamaError(f"Ollama HTTP {e.code}: {details}") from e
-        raise OllamaError(f"Ollama HTTP {e.code}: {e.reason}") from e
+            raise OllamaError(f"Ollama HTTP {e.code}: {details}{model_hint}") from e
+        raise OllamaError(f"Ollama HTTP {e.code}: {e.reason}{model_hint}") from e
     except urllib.error.URLError as e:
         raise OllamaError(f"Ollama unreachable: {e}") from e
     except Exception as e:
