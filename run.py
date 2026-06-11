@@ -12,6 +12,7 @@ from rich.table import Table
 
 console = Console()
 MENU_CHOICES = ("1", "2", "3", "4", "5", "q")
+REVIEW_TARGET_CHOICES = ("1", "2", "3", "4", "q")
 
 
 class HelpFormatter(argparse.RawDescriptionHelpFormatter):
@@ -145,7 +146,7 @@ def render_main_menu(
 
     table.add_row("1", "Auto Commit", "Scan repositories, build commit messages, then commit/push after confirmation.", "[green]Ready[/]")
     table.add_row("2", "Merge", "Create and auto-merge release PRs into resolved base branches.", "[green]Ready[/]")
-    table.add_row("3", "Review Code", "Prepare AI-assisted code comments for changed code.", "[yellow]Soon[/]")
+    table.add_row("3", "Review Code", "Preview AI-assisted code comments for changed code.", "[cyan]Preview[/]")
     table.add_row("4", "Changelog", "Update changelogs from Conventional Commits.", "[green]Ready[/]")
     table.add_row("5", "Sync", "Checkout and fast-forward local base branches.", "[green]Ready[/]")
     table.add_row("q", "Quit", "Leave the tool without running another workflow.", "[dim]Exit[/]")
@@ -162,20 +163,197 @@ def ask_main_action() -> str:
     ).lower()
 
 
-def show_review_placeholder() -> None:
-    section_title("Review Code", "🔎")
+def render_repository_picker(repositories: list[tuple[str, str]]) -> None:
+    table = Table(
+        box=box.ROUNDED,
+        show_lines=False,
+        header_style="bold cyan",
+        border_style="bright_black",
+    )
+    table.add_column("Key", justify="center", style="bold cyan", no_wrap=True)
+    table.add_column("Repository", style="bold white", no_wrap=True)
+    table.add_column("Path", style="dim")
+
+    for index, (repo_name, repo_path) in enumerate(repositories, start=1):
+        table.add_row(str(index), repo_name, repo_path)
+    table.add_row("q", "Back", "Return to main menu")
+
+    console.print(table)
+
+
+def ask_review_repository(repositories: list[tuple[str, str]]) -> tuple[str, str] | None:
+    if not repositories:
+        return None
+
+    choices = [str(index) for index in range(1, len(repositories) + 1)] + ["q"]
+    selected = Prompt.ask(
+        "\n[bold white]Select repository to review[/]",
+        choices=choices,
+        default="q",
+        show_choices=False,
+    ).lower()
+
+    if selected == "q":
+        return None
+    return repositories[int(selected) - 1]
+
+
+def render_review_target_menu() -> None:
+    table = Table(
+        box=box.ROUNDED,
+        show_lines=False,
+        header_style="bold cyan",
+        border_style="bright_black",
+    )
+    table.add_column("Key", justify="center", style="bold cyan", no_wrap=True)
+    table.add_column("Target", style="bold white", no_wrap=True)
+    table.add_column("Git context", style="white")
+
+    table.add_row("1", "Worktree", "git diff")
+    table.add_row("2", "Staged", "git diff --cached")
+    table.add_row("3", "Branch", "git diff <branch>...HEAD")
+    table.add_row("4", "Commit", "git show <ref>")
+    table.add_row("q", "Back", "Return to main menu")
+
+    console.print(table)
+
+
+def ask_review_target() -> tuple[str, str | None] | None:
+    from core.review import (
+        REVIEW_TARGET_BRANCH,
+        REVIEW_TARGET_COMMIT,
+        REVIEW_TARGET_STAGED,
+        REVIEW_TARGET_WORKTREE,
+    )
+
+    render_review_target_menu()
+    selected = Prompt.ask(
+        "\n[bold white]What code should be reviewed?[/]",
+        choices=list(REVIEW_TARGET_CHOICES),
+        default="1",
+        show_choices=False,
+    ).lower()
+
+    if selected == "q":
+        return None
+    if selected == "1":
+        return REVIEW_TARGET_WORKTREE, None
+    if selected == "2":
+        return REVIEW_TARGET_STAGED, None
+    if selected == "3":
+        ref = Prompt.ask("[bold white]Branch to compare against[/]", default="main").strip()
+        return REVIEW_TARGET_BRANCH, ref
+
+    ref = Prompt.ask("[bold white]Commit ref to review[/]", default="HEAD~1").strip()
+    return REVIEW_TARGET_COMMIT, ref
+
+
+def render_review_comment_plan(repo_name: str, context, plan) -> None:
+    files_label = ", ".join(context.files[:5]) if context.files else "(none)"
+    if len(context.files) > 5:
+        files_label += f", +{len(context.files) - 5} more"
+
     console.print(
         Panel(
             (
-                "[bold yellow]AI code review is coming next.[/]\n\n"
-                "This menu entry is intentionally wired now so the upcoming review workflow has a stable place.\n"
-                "Next steps will add Git context selection, Ollama suggestions, preview, and safe application."
+                f"[bold white]Repository:[/] [cyan]{repo_name}[/]\n"
+                f"[bold white]Target:[/] {context.label}\n"
+                f"[bold white]Changed files:[/] {files_label}\n\n"
+                f"{plan.summary or 'No summary provided.'}"
             ),
-            title="[bold yellow]Placeholder[/]",
-            border_style="yellow",
+            title="[bold cyan]Review Preview[/]",
+            border_style="cyan",
             padding=(1, 2),
         )
     )
+
+    if not plan.has_comments:
+        console.print(
+            Panel(
+                "No useful code comments were proposed for this context.",
+                title="[bold yellow]No Comments Proposed[/]",
+                border_style="yellow",
+                padding=(1, 2),
+            )
+        )
+        return
+
+    for index, suggestion in enumerate(plan.comments, start=1):
+        console.print(
+            Panel(
+                (
+                    f"[bold white]File:[/] [cyan]{suggestion.file}[/]\n"
+                    f"[bold white]Placement:[/] {suggestion.placement} anchor\n"
+                    f"[bold white]Anchor:[/] {suggestion.anchor}\n\n"
+                    f"[bold white]Comment to insert:[/]\n{suggestion.comment}\n\n"
+                    f"[bold white]Why:[/] {suggestion.reason or 'Not specified.'}"
+                ),
+                title=f"[bold green]Suggested Comment {index}[/]",
+                border_style="green",
+                padding=(1, 2),
+            )
+        )
+
+    console.print(
+        Panel(
+            "Preview only. No source file was modified.",
+            title="[bold magenta]Safe Mode[/]",
+            border_style="magenta",
+            padding=(1, 2),
+        )
+    )
+
+
+def run_review_workflow(root_dirs: list[str]) -> None:
+    from core.repositories import iter_git_repositories
+    from core.review import ReviewContextError, collect_review_context, generate_review_comments
+
+    section_title("Review Code", "🔎")
+
+    repositories: list[tuple[str, str]] = []
+    for root_dir in root_dirs:
+        repositories.extend(iter_git_repositories(root_dir))
+
+    if not repositories:
+        console.print(
+            Panel(
+                "No Git repositories were found in the configured root directories.",
+                title="[bold yellow]Nothing To Review[/]",
+                border_style="yellow",
+                padding=(1, 2),
+            )
+        )
+        return
+
+    render_repository_picker(repositories)
+    selected_repo = ask_review_repository(repositories)
+    if selected_repo is None:
+        return
+
+    repo_name, repo_path = selected_repo
+    selected_target = ask_review_target()
+    if selected_target is None:
+        return
+
+    target, ref = selected_target
+
+    try:
+        context = collect_review_context(repo_path, target, ref)
+    except ReviewContextError as error:
+        console.print(
+            Panel(
+                str(error),
+                title="[bold red]Review Context Error[/]",
+                border_style="red",
+                padding=(1, 2),
+            )
+        )
+        return
+
+    with console.status("[bold cyan]Generating review comment suggestions...[/]", spinner="dots"):
+        plan = generate_review_comments(repo_name, context)
+
+    render_review_comment_plan(repo_name, context, plan)
 
 
 def run_selected_action(
@@ -204,7 +382,7 @@ def run_selected_action(
         return True
 
     if choice == "3":
-        show_review_placeholder()
+        run_review_workflow(root_dirs)
         return True
 
     if choice == "4":

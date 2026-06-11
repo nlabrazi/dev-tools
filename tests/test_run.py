@@ -2,11 +2,13 @@ import io
 import os
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
 from rich.console import Console
 
+from core.review import ReviewCommentPlan, ReviewCommentSuggestion, ReviewContext
 import run
 
 
@@ -59,7 +61,7 @@ class RunConfigTests(unittest.TestCase):
         output = buffer.getvalue()
         self.assertIn("Dev Tools Control Deck", output)
         self.assertIn("Review Code", output)
-        self.assertIn("Soon", output)
+        self.assertIn("Preview", output)
 
     def test_ask_main_action_returns_prompt_choice(self) -> None:
         with patch("run.Prompt.ask", return_value="3") as prompt:
@@ -68,8 +70,93 @@ class RunConfigTests(unittest.TestCase):
         self.assertEqual(choice, "3")
         prompt.assert_called_once()
 
-    def test_run_selected_action_dispatches_review_placeholder(self) -> None:
-        with patch("run.show_review_placeholder") as show_review_placeholder:
+    def test_ask_review_repository_returns_selected_repo(self) -> None:
+        repositories = [("api", "/tmp/api"), ("web", "/tmp/web")]
+
+        with patch("run.Prompt.ask", return_value="2"):
+            selected = run.ask_review_repository(repositories)
+
+        self.assertEqual(selected, ("web", "/tmp/web"))
+
+    def test_ask_review_target_supports_branch_ref(self) -> None:
+        with patch("run.render_review_target_menu"), patch(
+            "run.Prompt.ask",
+            side_effect=["3", "develop"],
+        ):
+            target = run.ask_review_target()
+
+        self.assertEqual(target, ("branch", "develop"))
+
+    def test_render_review_comment_plan_outputs_suggestions(self) -> None:
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+        context = ReviewContext(
+            repo_path="/tmp/repo",
+            target="worktree",
+            label="worktree changes",
+            files=["src/app.ts"],
+            diff="diff --git",
+        )
+        plan = ReviewCommentPlan(
+            summary="Clarify payload normalization.",
+            comments=[
+                ReviewCommentSuggestion(
+                    file="src/app.ts",
+                    anchor="function buildPayload(input) {",
+                    placement="before",
+                    comment="// Normalize before signing so retries stay stable.",
+                    reason="Order-sensitive behavior.",
+                )
+            ],
+        )
+
+        with patch("run.console", test_console):
+            run.render_review_comment_plan("repo", context, plan)
+
+        output = buffer.getvalue()
+        self.assertIn("Review Preview", output)
+        self.assertIn("Suggested Comment 1", output)
+        self.assertIn("Preview only", output)
+
+    def test_run_review_workflow_collects_generates_and_renders_preview(self) -> None:
+        context = ReviewContext(
+            repo_path="/tmp/repo",
+            target="worktree",
+            label="worktree changes",
+            files=["src/app.ts"],
+            diff="diff --git",
+        )
+        plan = ReviewCommentPlan(summary="Summary", comments=[])
+
+        with patch(
+            "core.repositories.iter_git_repositories",
+            return_value=[("repo", "/tmp/repo")],
+        ), patch("run.render_repository_picker"), patch(
+            "run.ask_review_repository",
+            return_value=("repo", "/tmp/repo"),
+        ), patch(
+            "run.ask_review_target",
+            return_value=("worktree", None),
+        ), patch(
+            "core.review.collect_review_context",
+            return_value=context,
+        ) as collect_review_context, patch(
+            "core.review.generate_review_comments",
+            return_value=plan,
+        ) as generate_review_comments, patch(
+            "run.render_review_comment_plan"
+        ) as render_review_comment_plan, patch(
+            "run.console.status",
+            return_value=nullcontext(),
+        ), patch("run.section_title"):
+            run.run_review_workflow(["/tmp/root"])
+
+        collect_review_context.assert_called_once_with("/tmp/repo", "worktree", None)
+        generate_review_comments.assert_called_once_with("repo", context)
+        render_review_comment_plan.assert_called_once_with("repo", context, plan)
+
+    def test_run_selected_action_dispatches_review_workflow(self) -> None:
+        with patch("run.run_review_workflow") as run_review_workflow:
             should_continue = run.run_selected_action(
                 "3",
                 root_dirs=["/tmp/root"],
@@ -78,7 +165,7 @@ class RunConfigTests(unittest.TestCase):
             )
 
         self.assertTrue(should_continue)
-        show_review_placeholder.assert_called_once_with()
+        run_review_workflow.assert_called_once_with(["/tmp/root"])
 
     def test_run_selected_action_quit_stops_menu_loop(self) -> None:
         should_continue = run.run_selected_action(
