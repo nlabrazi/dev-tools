@@ -1,22 +1,33 @@
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import call, patch
 
 from core.review import (
+    CodeReviewFormatError,
+    REVIEW_TARGET_FILE,
     DEFAULT_REVIEW_DIFF_MAX_CHARS,
+    DEFAULT_REVIEW_FILE_MAX_CHARS,
     REVIEW_TARGET_BRANCH,
     REVIEW_TARGET_COMMIT,
     REVIEW_TARGET_STAGED,
     REVIEW_TARGET_WORKTREE,
+    CodeReviewExplanation,
     ReviewContext,
     ReviewContextError,
     ReviewCommentFormatError,
+    build_code_review_explanation,
     build_review_comment_plan,
     collect_review_context,
+    generate_code_review,
+    generate_code_review_with_ollama,
     generate_review_comments,
     generate_review_comments_with_ollama,
     get_review_diff_max_chars,
+    get_review_file_max_chars,
     is_commentable_source_file,
+    is_reviewable_text_file,
 )
 
 
@@ -38,6 +49,15 @@ class ReviewContextCollectionTests(unittest.TestCase):
 
         self.assertEqual(configured, 16000)
         self.assertEqual(too_small, DEFAULT_REVIEW_DIFF_MAX_CHARS)
+
+    def test_get_review_file_max_chars_uses_environment_with_minimum(self) -> None:
+        with patch.dict("os.environ", {"OLLAMA_MAX_REVIEW_FILE_CHARS": "18000"}, clear=True):
+            configured = get_review_file_max_chars()
+        with patch.dict("os.environ", {"OLLAMA_MAX_REVIEW_FILE_CHARS": "999"}, clear=True):
+            too_small = get_review_file_max_chars()
+
+        self.assertEqual(configured, 18000)
+        self.assertEqual(too_small, DEFAULT_REVIEW_FILE_MAX_CHARS)
 
     def test_collect_worktree_context_uses_git_diff_and_file_list(self) -> None:
         diff_result = completed(["git", "diff"], "diff --git a/app.py b/app.py\n+print('hello')\n")
@@ -140,6 +160,40 @@ class ReviewContextCollectionTests(unittest.TestCase):
             max_output_chars=None,
         )
 
+    def test_collect_file_context_reads_specific_file_and_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_path = Path(tmp_dir)
+            app_file = repo_path / "src" / "app.ts"
+            app_file.parent.mkdir()
+            app_file.write_text("export function buildPayload() {}\n", encoding="utf-8")
+            diff_result = completed(
+                ["git", "diff", "--", "src/app.ts"],
+                "diff --git a/src/app.ts b/src/app.ts\n+export function buildPayload() {}\n",
+            )
+
+            with patch("core.review.git_command", return_value=diff_result) as git_command:
+                context = collect_review_context(str(repo_path), REVIEW_TARGET_FILE, ref="src/app.ts")
+
+        self.assertEqual(context.target, REVIEW_TARGET_FILE)
+        self.assertEqual(context.ref, "src/app.ts")
+        self.assertEqual(context.files, ["src/app.ts"])
+        self.assertIn("Current file content", context.diff)
+        self.assertIn("export function buildPayload", context.diff)
+        git_command.assert_called_once_with(
+            str(repo_path),
+            ["diff", "--no-ext-diff", "--", "src/app.ts"],
+            silent=True,
+            max_output_chars=DEFAULT_REVIEW_DIFF_MAX_CHARS,
+        )
+
+    def test_collect_file_context_rejects_sensitive_or_escaping_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self.assertRaises(ReviewContextError):
+                collect_review_context(tmp_dir, REVIEW_TARGET_FILE, ref=".env")
+
+            with self.assertRaises(ReviewContextError):
+                collect_review_context(tmp_dir, REVIEW_TARGET_FILE, ref="../secret.py")
+
     def test_collect_review_context_rejects_missing_ref_for_branch_and_commit(self) -> None:
         with self.assertRaises(ReviewContextError):
             collect_review_context("/tmp/repo", REVIEW_TARGET_BRANCH)
@@ -181,6 +235,13 @@ class ReviewCommentGenerationTests(unittest.TestCase):
         self.assertFalse(is_commentable_source_file("package-lock.json"))
         self.assertFalse(is_commentable_source_file("public/logo.png"))
         self.assertFalse(is_commentable_source_file("README.md"))
+
+    def test_is_reviewable_text_file_allows_docs_but_filters_sensitive_files(self) -> None:
+        self.assertTrue(is_reviewable_text_file("src/app.ts"))
+        self.assertTrue(is_reviewable_text_file("README.md"))
+        self.assertTrue(is_reviewable_text_file("config/app.yaml"))
+        self.assertFalse(is_reviewable_text_file(".env"))
+        self.assertFalse(is_reviewable_text_file("public/logo.png"))
 
     def test_build_review_comment_plan_filters_invalid_and_out_of_scope_comments(self) -> None:
         data = {
@@ -375,6 +436,120 @@ class ReviewCommentGenerationTests(unittest.TestCase):
 
         self.assertEqual(plan.summary, "No AI code comments generated.")
         self.assertFalse(plan.has_comments)
+
+
+class CodeReviewExplanationTests(unittest.TestCase):
+    def test_build_code_review_explanation_parses_valid_json(self) -> None:
+        data = {
+            "review": {
+                "title": "Comprendre le fichier de payload",
+                "overview": "Ce fichier prépare les données envoyées à l'API.",
+                "technical_context": "Il centralise la normalisation avant l'appel réseau.",
+                "important_files": ["src/app.ts contient la logique principale."],
+                "behavior": ["La modification stabilise le payload."],
+                "points_to_check": ["Vérifier les retries."],
+                "risks": ["La signature peut casser si l'ordre change."],
+            }
+        }
+
+        explanation = build_code_review_explanation(data)
+
+        self.assertEqual(explanation.title, "Comprendre le fichier de payload")
+        self.assertTrue(explanation.has_content)
+        self.assertEqual(explanation.points_to_check, ["Vérifier les retries."])
+
+    def test_build_code_review_explanation_rejects_missing_review_object(self) -> None:
+        with self.assertRaises(CodeReviewFormatError):
+            build_code_review_explanation({"title": "invalid"})
+
+    def test_generate_code_review_with_ollama_builds_from_valid_json(self) -> None:
+        raw = """
+        {
+          "review": {
+            "title": "Comprendre le payload API",
+            "overview": "Ce fichier prépare les données envoyées à l'API.",
+            "technical_context": "Il centralise la normalisation avant l'appel réseau.",
+            "important_files": ["src/app.ts porte la logique principale."],
+            "behavior": ["Le changement rend le payload plus stable."],
+            "points_to_check": ["Vérifier les cas de retry."],
+            "risks": ["Un ordre incorrect peut casser la signature."]
+          }
+        }
+        """
+        context = ReviewContext(
+            repo_path="/tmp/repo",
+            target=REVIEW_TARGET_WORKTREE,
+            label="worktree changes",
+            files=["src/app.ts"],
+            diff="diff --git a/src/app.ts b/src/app.ts\n+function buildPayload(input) {\n",
+        )
+
+        with patch.dict(
+            "os.environ",
+            {"OLLAMA_HOST": "http://localhost:11434"},
+            clear=True,
+        ), patch("core.review.chat_json", return_value=raw) as chat_json, patch("core.review.print"):
+            explanation = generate_code_review_with_ollama("repo", context)
+
+        self.assertIsNotNone(explanation)
+        assert explanation is not None
+        self.assertEqual(explanation.title, "Comprendre le payload API")
+        self.assertIn("retry", explanation.points_to_check[0])
+        chat_json.assert_called_once()
+
+    def test_generate_code_review_with_ollama_returns_none_when_disabled(self) -> None:
+        context = ReviewContext(
+            repo_path="/tmp/repo",
+            target=REVIEW_TARGET_WORKTREE,
+            label="worktree changes",
+            files=["src/app.ts"],
+            diff="diff --git",
+        )
+
+        with patch.dict("os.environ", {"ENABLE_OLLAMA": "0"}, clear=True), patch(
+            "core.review.chat_json"
+        ) as chat_json:
+            explanation = generate_code_review_with_ollama("repo", context)
+
+        self.assertIsNone(explanation)
+        chat_json.assert_not_called()
+
+    def test_generate_code_review_with_ollama_skips_remote_context_without_opt_in(self) -> None:
+        context = ReviewContext(
+            repo_path="/tmp/repo",
+            target=REVIEW_TARGET_WORKTREE,
+            label="worktree changes",
+            files=["src/app.ts"],
+            diff="diff --git",
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "OLLAMA_HOST": "http://example.com:11434",
+                "OLLAMA_ALLOW_REMOTE": "1",
+            },
+            clear=True,
+        ), patch("core.review.chat_json") as chat_json, patch("core.review.print"):
+            explanation = generate_code_review_with_ollama("repo", context)
+
+        self.assertIsNone(explanation)
+        chat_json.assert_not_called()
+
+    def test_generate_code_review_returns_empty_fallback_when_ollama_fails(self) -> None:
+        context = ReviewContext(
+            repo_path="/tmp/repo",
+            target=REVIEW_TARGET_WORKTREE,
+            label="worktree changes",
+            files=["src/app.ts"],
+            diff="diff --git",
+        )
+
+        with patch("core.review.generate_code_review_with_ollama", return_value=None):
+            explanation = generate_code_review("repo", context)
+
+        self.assertEqual(explanation.title, "Review indisponible")
+        self.assertFalse(explanation.points_to_check)
 
 
 if __name__ == "__main__":

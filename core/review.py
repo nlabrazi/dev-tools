@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 
 from core.formatters import safe_parse_json
 from core.ollama import (
@@ -8,22 +9,30 @@ from core.ollama import (
     ensure_repo_context_allowed,
     is_ollama_enabled,
 )
-from core.prompts import CODE_COMMENT_SYSTEM, CODE_COMMENT_USER_TEMPLATE
-from utils.common import describe_command_failure, env_int
+from core.prompts import (
+    CODE_COMMENT_SYSTEM,
+    CODE_COMMENT_USER_TEMPLATE,
+    CODE_REVIEW_SYSTEM,
+    CODE_REVIEW_USER_TEMPLATE,
+)
+from utils.common import describe_command_failure, env_int, trim_text_middle
 from utils.git import git_command
 
 REVIEW_TARGET_WORKTREE = "worktree"
 REVIEW_TARGET_STAGED = "staged"
 REVIEW_TARGET_BRANCH = "branch"
 REVIEW_TARGET_COMMIT = "commit"
+REVIEW_TARGET_FILE = "file"
 REVIEW_TARGETS = {
     REVIEW_TARGET_WORKTREE,
     REVIEW_TARGET_STAGED,
     REVIEW_TARGET_BRANCH,
     REVIEW_TARGET_COMMIT,
+    REVIEW_TARGET_FILE,
 }
 
 DEFAULT_REVIEW_DIFF_MAX_CHARS = 12000
+DEFAULT_REVIEW_FILE_MAX_CHARS = 14000
 MAX_REVIEW_COMMENTS = 5
 COMMENTABLE_EXTENSIONS = {
     ".c",
@@ -74,6 +83,17 @@ IGNORED_REVIEW_SUFFIXES = (
     ".svg",
     ".webp",
 )
+REVIEWABLE_TEXT_EXTENSIONS = COMMENTABLE_EXTENSIONS | {
+    ".ini",
+    ".json",
+    ".md",
+    ".mdx",
+    ".toml",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
 VALID_COMMENT_PLACEMENTS = {"before", "after"}
 
 
@@ -82,6 +102,10 @@ class ReviewContextError(RuntimeError):
 
 
 class ReviewCommentFormatError(ValueError):
+    pass
+
+
+class CodeReviewFormatError(ValueError):
     pass
 
 
@@ -118,8 +142,37 @@ class ReviewCommentPlan:
         return bool(self.comments)
 
 
+@dataclass(frozen=True)
+class CodeReviewExplanation:
+    title: str
+    overview: str
+    technical_context: str
+    important_files: list[str]
+    behavior: list[str]
+    points_to_check: list[str]
+    risks: list[str]
+
+    @property
+    def has_content(self) -> bool:
+        return any(
+            [
+                self.title,
+                self.overview,
+                self.technical_context,
+                self.important_files,
+                self.behavior,
+                self.points_to_check,
+                self.risks,
+            ]
+        )
+
+
 def get_review_diff_max_chars() -> int:
     return env_int("OLLAMA_MAX_REVIEW_DIFF_CHARS", DEFAULT_REVIEW_DIFF_MAX_CHARS, minimum=1000)
+
+
+def get_review_file_max_chars() -> int:
+    return env_int("OLLAMA_MAX_REVIEW_FILE_CHARS", DEFAULT_REVIEW_FILE_MAX_CHARS, minimum=1000)
 
 
 def _as_clean_string(value: object, *, max_chars: int | None = None) -> str:
@@ -148,6 +201,23 @@ def is_commentable_source_file(file_path: str) -> bool:
     return name[dot_index:] in COMMENTABLE_EXTENSIONS
 
 
+def is_reviewable_text_file(file_path: str) -> bool:
+    normalized = file_path.strip().replace("\\", "/")
+    if not normalized:
+        return False
+
+    name = normalized.rsplit("/", 1)[-1].lower()
+    if name in IGNORED_REVIEW_FILENAMES:
+        return False
+    if any(name.endswith(suffix) for suffix in IGNORED_REVIEW_SUFFIXES):
+        return False
+
+    dot_index = name.rfind(".")
+    if dot_index == -1:
+        return False
+    return name[dot_index:] in REVIEWABLE_TEXT_EXTENSIONS
+
+
 def _clean_ref(ref: str | None, *, target: str) -> str:
     cleaned = (ref or "").strip()
     if not cleaned:
@@ -165,6 +235,21 @@ def _split_files(raw_output: str) -> list[str]:
         files.append(file_name)
         seen.add(file_name)
     return files
+
+
+def _as_string_list(value: object, *, max_items: int = 8, max_chars: int = 500) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    items: list[str] = []
+    for raw_item in value:
+        item = _as_clean_string(raw_item, max_chars=max_chars)
+        if not item:
+            continue
+        items.append(item)
+        if len(items) >= max_items:
+            break
+    return items
 
 
 def _format_files_for_prompt(files: list[str]) -> str:
@@ -226,6 +311,22 @@ def build_review_comment_plan(
     return ReviewCommentPlan(summary=summary, comments=comments)
 
 
+def build_code_review_explanation(data: dict) -> CodeReviewExplanation:
+    if not isinstance(data, dict) or "review" not in data or not isinstance(data["review"], dict):
+        raise CodeReviewFormatError("Invalid JSON: missing 'review' object")
+
+    review = data["review"]
+    return CodeReviewExplanation(
+        title=_as_clean_string(review.get("title"), max_chars=120),
+        overview=_as_clean_string(review.get("overview"), max_chars=1600),
+        technical_context=_as_clean_string(review.get("technical_context"), max_chars=1600),
+        important_files=_as_string_list(review.get("important_files")),
+        behavior=_as_string_list(review.get("behavior")),
+        points_to_check=_as_string_list(review.get("points_to_check")),
+        risks=_as_string_list(review.get("risks")),
+    )
+
+
 def _git_output_or_raise(
     repo_path: str,
     args: list[str],
@@ -276,6 +377,62 @@ def _build_context(
     )
 
 
+def _clean_relative_file_path(raw_path: str | None) -> str:
+    cleaned = (raw_path or "").strip().replace("\\", "/")
+    if not cleaned:
+        raise ReviewContextError("A relative file path is required for review target 'file'.")
+    if cleaned.startswith("/") or cleaned == ".":
+        raise ReviewContextError("File review requires a relative path inside the repository.")
+    parts = [part for part in cleaned.split("/") if part]
+    if any(part == ".." for part in parts):
+        raise ReviewContextError("File review path cannot escape the repository.")
+    return "/".join(parts)
+
+
+def _read_review_file(repo_path: str, relative_file_path: str) -> str:
+    if not is_reviewable_text_file(relative_file_path):
+        raise ReviewContextError(f"Refusing to review unsupported or sensitive file '{relative_file_path}'.")
+
+    repo_root = Path(repo_path).resolve()
+    file_path = (repo_root / relative_file_path).resolve()
+    try:
+        file_path.relative_to(repo_root)
+    except ValueError as error:
+        raise ReviewContextError("File review path cannot escape the repository.") from error
+
+    if not file_path.is_file():
+        raise ReviewContextError(f"File not found: {relative_file_path}")
+
+    try:
+        return file_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as error:
+        raise ReviewContextError(f"File is not valid UTF-8 text: {relative_file_path}") from error
+
+
+def _build_file_context(repo_path: str, relative_file_path: str) -> ReviewContext:
+    file_content = trim_text_middle(_read_review_file(repo_path, relative_file_path), get_review_file_max_chars())
+    file_diff = _git_output_or_raise(
+        repo_path,
+        ["diff", "--no-ext-diff", "--", relative_file_path],
+        context=f"collect file diff for {relative_file_path}",
+        max_output_chars=get_review_diff_max_chars(),
+    )
+    diff_block = file_diff or "(no current worktree diff for this file)"
+    context_text = (
+        f"File path: {relative_file_path}\n\n"
+        f"Current file content:\n{file_content}\n\n"
+        f"Current worktree diff for this file:\n{diff_block}"
+    )
+    return ReviewContext(
+        repo_path=repo_path,
+        target=REVIEW_TARGET_FILE,
+        label=f"file {relative_file_path}",
+        diff=context_text,
+        files=[relative_file_path],
+        ref=relative_file_path,
+    )
+
+
 def collect_review_context(repo_path: str, target: str = REVIEW_TARGET_WORKTREE, ref: str | None = None) -> ReviewContext:
     normalized_target = (target or "").strip().lower()
     if normalized_target not in REVIEW_TARGETS:
@@ -312,6 +469,9 @@ def collect_review_context(repo_path: str, target: str = REVIEW_TARGET_WORKTREE,
             ref=branch,
         )
 
+    if normalized_target == REVIEW_TARGET_FILE:
+        return _build_file_context(repo_path, _clean_relative_file_path(ref))
+
     commit_ref = _clean_ref(ref, target=normalized_target)
     return _build_context(
         repo_path,
@@ -320,6 +480,80 @@ def collect_review_context(repo_path: str, target: str = REVIEW_TARGET_WORKTREE,
         diff_args=["show", "--stat", "--patch", "--no-ext-diff", commit_ref],
         files_args=["show", "--name-only", "--format=", commit_ref],
         ref=commit_ref,
+    )
+
+
+def generate_code_review_with_ollama(
+    repo_name: str,
+    context: ReviewContext,
+) -> CodeReviewExplanation | None:
+    if not is_ollama_enabled():
+        return None
+    if not context.has_changes:
+        return CodeReviewExplanation(
+            title="Aucun changement détecté",
+            overview=f"Aucun changement exploitable n'a été trouvé pour {context.label}.",
+            technical_context="",
+            important_files=[],
+            behavior=[],
+            points_to_check=[],
+            risks=[],
+        )
+
+    try:
+        ensure_repo_context_allowed("git review context")
+
+        user_prompt = CODE_REVIEW_USER_TEMPLATE.format(
+            repo=repo_name,
+            target_label=context.label,
+            files=_format_files_for_prompt(context.files),
+            diff=context.diff,
+        )
+        messages = [
+            {"role": "system", "content": CODE_REVIEW_SYSTEM},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        raw = chat_json(messages, temperature=0.2, json_mode=True)
+        debug_log_output("Code review explanation output (attempt 1)", raw)
+
+        data = safe_parse_json(raw)
+        if data:
+            try:
+                return build_code_review_explanation(data)
+            except CodeReviewFormatError:
+                pass
+
+        print("⚠️ Ollama review explanation invalid, retrying once.")
+        raw_retry = chat_json(messages, temperature=0.0, json_mode=True)
+        debug_log_output("Code review explanation output (attempt 2)", raw_retry)
+
+        retry_data = safe_parse_json(raw_retry)
+        if retry_data:
+            return build_code_review_explanation(retry_data)
+
+        print("⚠️ Ollama review explanation unusable, no review generated.")
+        return None
+    except OllamaError as error:
+        print(f"⚠️ Ollama unavailable for code review, no review generated. Reason: {error}")
+        return None
+    except Exception as error:
+        print(f"⚠️ Ollama review explanation invalid, no review generated. Reason: {error}")
+        return None
+
+
+def generate_code_review(repo_name: str, context: ReviewContext) -> CodeReviewExplanation:
+    generated = generate_code_review_with_ollama(repo_name, context)
+    if generated:
+        return generated
+    return CodeReviewExplanation(
+        title="Review indisponible",
+        overview="Aucune explication IA n'a pu être générée pour ce contexte.",
+        technical_context="",
+        important_files=[],
+        behavior=[],
+        points_to_check=[],
+        risks=[],
     )
 
 
