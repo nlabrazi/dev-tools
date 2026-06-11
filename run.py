@@ -11,8 +11,8 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 console = Console()
-MENU_CHOICES = ("1", "2", "3", "4", "5", "q")
-REVIEW_TARGET_CHOICES = ("1", "2", "3", "4", "q")
+MENU_CHOICES = ("1", "2", "3", "4", "5", "6", "q")
+REVIEW_TARGET_CHOICES = ("1", "2", "3", "4", "5", "q")
 
 
 class HelpFormatter(argparse.RawDescriptionHelpFormatter):
@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
         DEFAULT_MODEL,
         DEFAULT_TIMEOUT,
     )
-    from core.review import DEFAULT_REVIEW_DIFF_MAX_CHARS
+    from core.review import DEFAULT_REVIEW_DIFF_MAX_CHARS, DEFAULT_REVIEW_FILE_MAX_CHARS
     from utils.git import DEFAULT_GIT_TIMEOUT
 
     root_dirs_preview = ", ".join(ROOT_DIRS) if ROOT_DIRS else "(none)"
@@ -80,6 +80,7 @@ Ollama:
   OLLAMA_MAX_DIFF_CHARS         Diff chars sent to commit prompt. Default: 4500
   OLLAMA_MAX_PR_SUMMARY_CHARS   Summary chars sent to PR prompt. Default: 5000
   OLLAMA_MAX_REVIEW_DIFF_CHARS  Diff chars sent to review prompt. Default: {DEFAULT_REVIEW_DIFF_MAX_CHARS}
+  OLLAMA_MAX_REVIEW_FILE_CHARS  File chars sent to review prompt. Default: {DEFAULT_REVIEW_FILE_MAX_CHARS}
   OLLAMA_ALLOW_REMOTE           Allow non-local Ollama host
   OLLAMA_ALLOW_REMOTE_CONTEXT   Allow sending git diffs/commit summaries to remote host
   OLLAMA_DEBUG                  0, 1, or full
@@ -146,9 +147,10 @@ def render_main_menu(
 
     table.add_row("1", "Auto Commit", "Scan repositories, build commit messages, then commit/push after confirmation.", "[green]Ready[/]")
     table.add_row("2", "Merge", "Create and auto-merge release PRs into resolved base branches.", "[green]Ready[/]")
-    table.add_row("3", "Review Code", "Preview AI-assisted code comments for changed code.", "[cyan]Preview[/]")
-    table.add_row("4", "Changelog", "Update changelogs from Conventional Commits.", "[green]Ready[/]")
-    table.add_row("5", "Sync", "Checkout and fast-forward local base branches.", "[green]Ready[/]")
+    table.add_row("3", "Review Code", "Explain selected code context in French without changing files.", "[cyan]Ready[/]")
+    table.add_row("4", "Comment Code", "Preview AI-assisted source comments for selected code.", "[cyan]Preview[/]")
+    table.add_row("5", "Changelog", "Update changelogs from Conventional Commits.", "[green]Ready[/]")
+    table.add_row("6", "Sync", "Checkout and fast-forward local base branches.", "[green]Ready[/]")
     table.add_row("q", "Quit", "Leave the tool without running another workflow.", "[dim]Exit[/]")
 
     console.print(table)
@@ -164,6 +166,15 @@ def ask_main_action() -> str:
 
 
 def render_repository_picker(repositories: list[tuple[str, str]]) -> None:
+    console.print(
+        Panel(
+            "Pick the repository that contains the code you want to inspect.",
+            title="[bold cyan]Step 1/2: Repository[/]",
+            border_style="cyan",
+            padding=(1, 2),
+        )
+    )
+
     table = Table(
         box=box.ROUNDED,
         show_lines=False,
@@ -185,9 +196,22 @@ def ask_review_repository(repositories: list[tuple[str, str]]) -> tuple[str, str
     if not repositories:
         return None
 
+    if len(repositories) == 1:
+        repo_name, repo_path = repositories[0]
+        console.print(
+            Panel(
+                f"[bold white]Repository:[/] [cyan]{repo_name}[/]\n[dim]{repo_path}[/]",
+                title="[bold cyan]Repository Selected[/]",
+                border_style="cyan",
+                padding=(1, 2),
+            )
+        )
+        return repositories[0]
+
+    render_repository_picker(repositories)
     choices = [str(index) for index in range(1, len(repositories) + 1)] + ["q"]
     selected = Prompt.ask(
-        "\n[bold white]Select repository to review[/]",
+        "\n[bold white]Repository[/]",
         choices=choices,
         default="q",
         show_choices=False,
@@ -199,36 +223,40 @@ def ask_review_repository(repositories: list[tuple[str, str]]) -> tuple[str, str
 
 
 def render_review_target_menu() -> None:
-    table = Table(
-        box=box.ROUNDED,
-        show_lines=False,
-        header_style="bold cyan",
-        border_style="bright_black",
+    console.print(
+        Panel(
+            (
+                "[bold cyan]1[/]  Current changes [dim](recommended)[/]\n"
+                "   Best when you stopped coding and want to understand what is in progress.\n\n"
+                "[bold cyan]2[/]  Staged changes\n"
+                "   Inspect only what is already prepared for the next commit.\n\n"
+                "[bold cyan]3[/]  Compare with a branch\n"
+                "   Use this for a feature branch, for example main...HEAD.\n\n"
+                "[bold cyan]4[/]  A specific commit/ref\n"
+                "   Use this when you want to explain an older commit, for example HEAD~1.\n\n"
+                "[bold cyan]5[/]  A specific file path\n"
+                "   Focus on one file by typing its relative path.\n\n"
+                "[bold cyan]q[/]  Back"
+            ),
+            title="[bold cyan]Step 2/2: Scope[/]",
+            border_style="cyan",
+            padding=(1, 2),
+        )
     )
-    table.add_column("Key", justify="center", style="bold cyan", no_wrap=True)
-    table.add_column("Target", style="bold white", no_wrap=True)
-    table.add_column("Git context", style="white")
-
-    table.add_row("1", "Worktree", "git diff")
-    table.add_row("2", "Staged", "git diff --cached")
-    table.add_row("3", "Branch", "git diff <branch>...HEAD")
-    table.add_row("4", "Commit", "git show <ref>")
-    table.add_row("q", "Back", "Return to main menu")
-
-    console.print(table)
 
 
 def ask_review_target() -> tuple[str, str | None] | None:
     from core.review import (
         REVIEW_TARGET_BRANCH,
         REVIEW_TARGET_COMMIT,
+        REVIEW_TARGET_FILE,
         REVIEW_TARGET_STAGED,
         REVIEW_TARGET_WORKTREE,
     )
 
     render_review_target_menu()
     selected = Prompt.ask(
-        "\n[bold white]What code should be reviewed?[/]",
+        "\n[bold white]Review scope[/]",
         choices=list(REVIEW_TARGET_CHOICES),
         default="1",
         show_choices=False,
@@ -241,14 +269,76 @@ def ask_review_target() -> tuple[str, str | None] | None:
     if selected == "2":
         return REVIEW_TARGET_STAGED, None
     if selected == "3":
-        ref = Prompt.ask("[bold white]Branch to compare against[/]", default="main").strip()
+        ref = Prompt.ask("[bold white]Base branch[/]", default="main").strip()
         return REVIEW_TARGET_BRANCH, ref
+    if selected == "5":
+        path = Prompt.ask("[bold white]Relative file path[/]").strip()
+        return REVIEW_TARGET_FILE, path
 
-    ref = Prompt.ask("[bold white]Commit ref to review[/]", default="HEAD~1").strip()
+    ref = Prompt.ask("[bold white]Commit or ref[/]", default="HEAD~1").strip()
     return REVIEW_TARGET_COMMIT, ref
 
 
-def render_review_comment_plan(repo_name: str, context, plan) -> None:
+def render_review_setup(repo_name: str, context) -> None:
+    file_count = len(context.files)
+    file_label = "file" if file_count == 1 else "files"
+    console.print(
+        Panel(
+            (
+                f"[bold white]Repository:[/] [cyan]{repo_name}[/]\n"
+                f"[bold white]Scope:[/] {context.label}\n"
+                f"[bold white]Changed files:[/] [cyan]{file_count} {file_label}[/]\n\n"
+                "[dim]Generating a French explanation only. Source files will not be modified.[/]"
+            ),
+            title="[bold cyan]Review Setup[/]",
+            border_style="cyan",
+            padding=(1, 2),
+        )
+    )
+
+
+def render_code_review_explanation(repo_name: str, context, explanation) -> None:
+    files_label = ", ".join(context.files[:5]) if context.files else "(none)"
+    if len(context.files) > 5:
+        files_label += f", +{len(context.files) - 5} more"
+
+    console.print(
+        Panel(
+            (
+                f"[bold white]Repository:[/] [cyan]{repo_name}[/]\n"
+                f"[bold white]Scope:[/] {context.label}\n"
+                f"[bold white]Files:[/] {files_label}\n\n"
+                f"[bold cyan]{explanation.title or 'Explication du contexte'}[/]\n\n"
+                f"{explanation.overview or 'Aucune synthèse fournie.'}\n\n"
+                f"{explanation.technical_context or ''}"
+            ).strip(),
+            title="[bold cyan]Review Result[/]",
+            border_style="cyan",
+            padding=(1, 2),
+        )
+    )
+
+    sections = [
+        ("Important Files", explanation.important_files),
+        ("Behavior", explanation.behavior),
+        ("Points To Check", explanation.points_to_check),
+        ("Risks", explanation.risks),
+    ]
+    for title, items in sections:
+        if not items:
+            continue
+        body = "\n".join(f"- {item}" for item in items)
+        console.print(
+            Panel(
+                body,
+                title=f"[bold green]{title}[/]",
+                border_style="green",
+                padding=(1, 2),
+            )
+        )
+
+
+def render_comment_plan(repo_name: str, context, plan) -> None:
     files_label = ", ".join(context.files[:5]) if context.files else "(none)"
     if len(context.files) > 5:
         files_label += f", +{len(context.files) - 5} more"
@@ -261,7 +351,7 @@ def render_review_comment_plan(repo_name: str, context, plan) -> None:
                 f"[bold white]Changed files:[/] {files_label}\n\n"
                 f"{plan.summary or 'No summary provided.'}"
             ),
-            title="[bold cyan]Review Preview[/]",
+            title="[bold cyan]Comment Preview[/]",
             border_style="cyan",
             padding=(1, 2),
         )
@@ -306,7 +396,7 @@ def render_review_comment_plan(repo_name: str, context, plan) -> None:
 
 def run_review_workflow(root_dirs: list[str]) -> None:
     from core.repositories import iter_git_repositories
-    from core.review import ReviewContextError, collect_review_context, generate_review_comments
+    from core.review import ReviewContextError, collect_review_context, generate_code_review
 
     section_title("Review Code", "🔎")
 
@@ -325,7 +415,6 @@ def run_review_workflow(root_dirs: list[str]) -> None:
         )
         return
 
-    render_repository_picker(repositories)
     selected_repo = ask_review_repository(repositories)
     if selected_repo is None:
         return
@@ -350,10 +439,63 @@ def run_review_workflow(root_dirs: list[str]) -> None:
         )
         return
 
-    with console.status("[bold cyan]Generating review comment suggestions...[/]", spinner="dots"):
+    render_review_setup(repo_name, context)
+
+    with console.status("[bold cyan]Generating French review explanation...[/]", spinner="dots"):
+        explanation = generate_code_review(repo_name, context)
+
+    render_code_review_explanation(repo_name, context, explanation)
+
+
+def run_comment_workflow(root_dirs: list[str]) -> None:
+    from core.repositories import iter_git_repositories
+    from core.review import ReviewContextError, collect_review_context, generate_review_comments
+
+    section_title("Comment Code", "💬")
+
+    repositories: list[tuple[str, str]] = []
+    for root_dir in root_dirs:
+        repositories.extend(iter_git_repositories(root_dir))
+
+    if not repositories:
+        console.print(
+            Panel(
+                "No Git repositories were found in the configured root directories.",
+                title="[bold yellow]Nothing To Comment[/]",
+                border_style="yellow",
+                padding=(1, 2),
+            )
+        )
+        return
+
+    selected_repo = ask_review_repository(repositories)
+    if selected_repo is None:
+        return
+
+    repo_name, repo_path = selected_repo
+    selected_target = ask_review_target()
+    if selected_target is None:
+        return
+
+    target, ref = selected_target
+
+    try:
+        context = collect_review_context(repo_path, target, ref)
+    except ReviewContextError as error:
+        console.print(
+            Panel(
+                str(error),
+                title="[bold red]Comment Context Error[/]",
+                border_style="red",
+                padding=(1, 2),
+            )
+        )
+        return
+
+    with console.status("[bold cyan]Generating source comment suggestions...[/]", spinner="dots"):
         plan = generate_review_comments(repo_name, context)
 
-    render_review_comment_plan(repo_name, context, plan)
+    render_comment_plan(repo_name, context, plan)
 
 
 def run_selected_action(
@@ -386,13 +528,17 @@ def run_selected_action(
         return True
 
     if choice == "4":
+        run_comment_workflow(root_dirs)
+        return True
+
+    if choice == "5":
         from core.changelog import update_all_repos_interactive
 
         section_title("Update Changelogs", "📝")
         update_all_repos_interactive(root_dirs)
         return True
 
-    if choice == "5":
+    if choice == "6":
         import core.sync as sync
 
         section_title("Sync Base Branches", "⏳")
