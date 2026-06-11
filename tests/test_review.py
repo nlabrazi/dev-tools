@@ -8,9 +8,15 @@ from core.review import (
     REVIEW_TARGET_COMMIT,
     REVIEW_TARGET_STAGED,
     REVIEW_TARGET_WORKTREE,
+    ReviewContext,
     ReviewContextError,
+    ReviewCommentFormatError,
+    build_review_comment_plan,
     collect_review_context,
+    generate_review_comments,
+    generate_review_comments_with_ollama,
     get_review_diff_max_chars,
+    is_commentable_source_file,
 )
 
 
@@ -165,6 +171,210 @@ class ReviewContextCollectionTests(unittest.TestCase):
         self.assertEqual(context.diff, "")
         self.assertEqual(context.files, [])
         self.assertFalse(context.has_changes)
+
+
+class ReviewCommentGenerationTests(unittest.TestCase):
+    def test_is_commentable_source_file_filters_sensitive_and_binary_files(self) -> None:
+        self.assertTrue(is_commentable_source_file("src/app.ts"))
+        self.assertTrue(is_commentable_source_file("components/Card.vue"))
+        self.assertFalse(is_commentable_source_file(".env"))
+        self.assertFalse(is_commentable_source_file("package-lock.json"))
+        self.assertFalse(is_commentable_source_file("public/logo.png"))
+        self.assertFalse(is_commentable_source_file("README.md"))
+
+    def test_build_review_comment_plan_filters_invalid_and_out_of_scope_comments(self) -> None:
+        data = {
+            "review": {
+                "summary": "Clarify non-obvious validation behavior.",
+                "comments": [
+                    {
+                        "file": "src/app.ts",
+                        "anchor": "function buildPayload(input) {",
+                        "placement": "after",
+                        "comment": "// Normalization must happen before signing the payload.",
+                        "reason": "Clarifies order-sensitive behavior.",
+                    },
+                    {
+                        "file": "package-lock.json",
+                        "anchor": "lockfileVersion",
+                        "placement": "before",
+                        "comment": "// Do not add comments here.",
+                        "reason": "Lockfile must be ignored.",
+                    },
+                    {
+                        "file": "src/other.ts",
+                        "anchor": "const other = true",
+                        "placement": "before",
+                        "comment": "// Out of scope.",
+                        "reason": "Not in changed files.",
+                    },
+                    {
+                        "file": "src/app.ts",
+                        "anchor": "",
+                        "placement": "before",
+                        "comment": "// Missing anchor.",
+                        "reason": "Invalid.",
+                    },
+                ],
+            }
+        }
+
+        plan = build_review_comment_plan(data, allowed_files=["src/app.ts"])
+
+        self.assertEqual(plan.summary, "Clarify non-obvious validation behavior.")
+        self.assertTrue(plan.has_comments)
+        self.assertEqual(len(plan.comments), 1)
+        self.assertEqual(plan.comments[0].file, "src/app.ts")
+        self.assertEqual(plan.comments[0].placement, "after")
+
+    def test_build_review_comment_plan_rejects_missing_review_object(self) -> None:
+        with self.assertRaises(ReviewCommentFormatError):
+            build_review_comment_plan({"comments": []})
+
+    def test_generate_review_comments_with_ollama_builds_from_valid_json(self) -> None:
+        raw = """
+        {
+          "review": {
+            "summary": "Clarify payload normalization.",
+            "comments": [
+              {
+                "file": "src/app.ts",
+                "anchor": "function buildPayload(input) {",
+                "placement": "before",
+                "comment": "// Normalize before signing so retries produce the same payload.",
+                "reason": "Explains an order-sensitive constraint."
+              }
+            ]
+          }
+        }
+        """
+        context = ReviewContext(
+            repo_path="/tmp/repo",
+            target=REVIEW_TARGET_WORKTREE,
+            label="worktree changes",
+            files=["src/app.ts"],
+            diff="diff --git a/src/app.ts b/src/app.ts\n+function buildPayload(input) {\n",
+        )
+
+        with patch.dict(
+            "os.environ",
+            {"OLLAMA_HOST": "http://localhost:11434"},
+            clear=True,
+        ), patch("core.review.chat_json", return_value=raw) as chat_json, patch("core.review.print"):
+            plan = generate_review_comments_with_ollama("repo", context)
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.summary, "Clarify payload normalization.")
+        self.assertEqual(len(plan.comments), 1)
+        self.assertEqual(plan.comments[0].comment, "// Normalize before signing so retries produce the same payload.")
+        chat_json.assert_called_once()
+
+    def test_generate_review_comments_with_ollama_returns_none_when_disabled(self) -> None:
+        context = ReviewContext(
+            repo_path="/tmp/repo",
+            target=REVIEW_TARGET_WORKTREE,
+            label="worktree changes",
+            files=["src/app.ts"],
+            diff="diff --git",
+        )
+
+        with patch.dict("os.environ", {"ENABLE_OLLAMA": "0"}, clear=True), patch(
+            "core.review.chat_json"
+        ) as chat_json:
+            plan = generate_review_comments_with_ollama("repo", context)
+
+        self.assertIsNone(plan)
+        chat_json.assert_not_called()
+
+    def test_generate_review_comments_with_ollama_skips_remote_context_without_opt_in(self) -> None:
+        context = ReviewContext(
+            repo_path="/tmp/repo",
+            target=REVIEW_TARGET_WORKTREE,
+            label="worktree changes",
+            files=["src/app.ts"],
+            diff="diff --git",
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "OLLAMA_HOST": "http://example.com:11434",
+                "OLLAMA_ALLOW_REMOTE": "1",
+            },
+            clear=True,
+        ), patch("core.review.chat_json") as chat_json, patch("core.review.print"):
+            plan = generate_review_comments_with_ollama("repo", context)
+
+        self.assertIsNone(plan)
+        chat_json.assert_not_called()
+
+    def test_generate_review_comments_with_ollama_retries_invalid_json_once(self) -> None:
+        invalid = "not json"
+        valid_retry = """
+        {
+          "review": {
+            "summary": "Retry succeeded.",
+            "comments": []
+          }
+        }
+        """
+        context = ReviewContext(
+            repo_path="/tmp/repo",
+            target=REVIEW_TARGET_WORKTREE,
+            label="worktree changes",
+            files=["src/app.ts"],
+            diff="diff --git a/src/app.ts b/src/app.ts\n+const enabled = true\n",
+        )
+
+        with patch.dict(
+            "os.environ",
+            {"OLLAMA_HOST": "http://localhost:11434"},
+            clear=True,
+        ), patch("core.review.chat_json", side_effect=[invalid, valid_retry]) as chat_json, patch("core.review.print"):
+            plan = generate_review_comments_with_ollama("repo", context)
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.summary, "Retry succeeded.")
+        self.assertEqual(chat_json.call_count, 2)
+
+    def test_generate_review_comments_with_ollama_does_not_call_ollama_for_empty_diff(self) -> None:
+        context = ReviewContext(
+            repo_path="/tmp/repo",
+            target=REVIEW_TARGET_WORKTREE,
+            label="worktree changes",
+            files=[],
+            diff="",
+        )
+
+        with patch.dict(
+            "os.environ",
+            {"OLLAMA_HOST": "http://localhost:11434"},
+            clear=True,
+        ), patch("core.review.chat_json") as chat_json:
+            plan = generate_review_comments_with_ollama("repo", context)
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertFalse(plan.has_comments)
+        self.assertIn("No changes found", plan.summary)
+        chat_json.assert_not_called()
+
+    def test_generate_review_comments_returns_empty_fallback_when_ollama_fails(self) -> None:
+        context = ReviewContext(
+            repo_path="/tmp/repo",
+            target=REVIEW_TARGET_WORKTREE,
+            label="worktree changes",
+            files=["src/app.ts"],
+            diff="diff --git",
+        )
+
+        with patch("core.review.generate_review_comments_with_ollama", return_value=None):
+            plan = generate_review_comments("repo", context)
+
+        self.assertEqual(plan.summary, "No AI code comments generated.")
+        self.assertFalse(plan.has_comments)
 
 
 if __name__ == "__main__":

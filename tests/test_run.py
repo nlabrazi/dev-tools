@@ -39,6 +39,7 @@ class RunConfigTests(unittest.TestCase):
         help_text = parser.format_help()
         self.assertIn("DEVTOOLS_ROOT_DIRS", help_text)
         self.assertIn("OLLAMA_ALLOW_REMOTE_CONTEXT", help_text)
+        self.assertIn("OLLAMA_MAX_REVIEW_DIFF_CHARS", help_text)
         self.assertIn("run.py auto-loads a local .env file", help_text)
         self.assertIn("--dry-run", help_text)
         self.assertIn("--prod", help_text)

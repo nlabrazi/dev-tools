@@ -52,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
         DEFAULT_MODEL,
         DEFAULT_TIMEOUT,
     )
+    from core.review import DEFAULT_REVIEW_DIFF_MAX_CHARS
     from utils.git import DEFAULT_GIT_TIMEOUT
 
     root_dirs_preview = ", ".join(ROOT_DIRS) if ROOT_DIRS else "(none)"
@@ -77,6 +78,7 @@ Ollama:
   OLLAMA_MAX_FILES              Files sent to commit prompt. Default: 80
   OLLAMA_MAX_DIFF_CHARS         Diff chars sent to commit prompt. Default: 4500
   OLLAMA_MAX_PR_SUMMARY_CHARS   Summary chars sent to PR prompt. Default: 5000
+  OLLAMA_MAX_REVIEW_DIFF_CHARS  Diff chars sent to review prompt. Default: {DEFAULT_REVIEW_DIFF_MAX_CHARS}
   OLLAMA_ALLOW_REMOTE           Allow non-local Ollama host
   OLLAMA_ALLOW_REMOTE_CONTEXT   Allow sending git diffs/commit summaries to remote host
   OLLAMA_DEBUG                  0, 1, or full
