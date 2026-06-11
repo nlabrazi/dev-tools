@@ -4,10 +4,14 @@ from pathlib import Path
 
 from pyfiglet import figlet_format
 from rich import print
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
+from rich.prompt import Prompt
+from rich.table import Table
 
 console = Console()
+MENU_CHOICES = ("1", "2", "3", "4", "5", "q")
 
 
 class HelpFormatter(argparse.RawDescriptionHelpFormatter):
@@ -101,18 +105,131 @@ def section_title(title: str, emoji: str) -> None:
     console.print(Panel.fit(f"{emoji}  {title.upper()}", style="bold green", border_style="cyan"))
 
 
+def render_main_menu(
+    *,
+    mode_label: str,
+    root_dirs: list[str],
+    head_branch: str,
+    base_branch_strategy: str,
+) -> None:
+    root_count = len(root_dirs)
+    root_label = "root" if root_count == 1 else "roots"
+
+    console.print(
+        Panel(
+            (
+                "[bold white]Choose a workflow and keep moving.[/]\n"
+                f"[dim]Mode:[/] {mode_label}  "
+                f"[dim]Head branch:[/] [cyan]{head_branch}[/]  "
+                f"[dim]Repository roots:[/] [cyan]{root_count} {root_label}[/]\n"
+                f"[dim]Base branch strategy:[/] {base_branch_strategy}"
+            ),
+            title="[bold cyan]Dev Tools Control Deck[/]",
+            border_style="cyan",
+            padding=(1, 2),
+        )
+    )
+
+    table = Table(
+        box=box.ROUNDED,
+        show_lines=False,
+        header_style="bold cyan",
+        border_style="bright_black",
+    )
+    table.add_column("Key", justify="center", style="bold cyan", no_wrap=True)
+    table.add_column("Workflow", style="bold white", no_wrap=True)
+    table.add_column("What it does", style="white")
+    table.add_column("Status", justify="center", no_wrap=True)
+
+    table.add_row("1", "Auto Commit", "Scan repositories, build commit messages, then commit/push after confirmation.", "[green]Ready[/]")
+    table.add_row("2", "Merge", "Create and auto-merge release PRs into resolved base branches.", "[green]Ready[/]")
+    table.add_row("3", "Review Code", "Prepare AI-assisted code comments for changed code.", "[yellow]Soon[/]")
+    table.add_row("4", "Changelog", "Update changelogs from Conventional Commits.", "[green]Ready[/]")
+    table.add_row("5", "Sync", "Checkout and fast-forward local base branches.", "[green]Ready[/]")
+    table.add_row("q", "Quit", "Leave the tool without running another workflow.", "[dim]Exit[/]")
+
+    console.print(table)
+
+
+def ask_main_action() -> str:
+    return Prompt.ask(
+        "\n[bold white]What do you want to do?[/]",
+        choices=list(MENU_CHOICES),
+        default="q",
+        show_choices=False,
+    ).lower()
+
+
+def show_review_placeholder() -> None:
+    section_title("Review Code", "🔎")
+    console.print(
+        Panel(
+            (
+                "[bold yellow]AI code review is coming next.[/]\n\n"
+                "This menu entry is intentionally wired now so the upcoming review workflow has a stable place.\n"
+                "Next steps will add Git context selection, Ollama suggestions, preview, and safe application."
+            ),
+            title="[bold yellow]Placeholder[/]",
+            border_style="yellow",
+            padding=(1, 2),
+        )
+    )
+
+
+def run_selected_action(
+    choice: str,
+    *,
+    root_dirs: list[str],
+    head_branch: str,
+    base_branch_strategy: str,
+) -> bool:
+    if choice == "q":
+        return False
+
+    if choice == "1":
+        from core.commit import auto_commit_all_repos
+
+        section_title(f"Auto-Commit {head_branch}", "🔧")
+        auto_commit_all_repos(root_dirs)
+        return True
+
+    if choice == "2":
+        import core.merge as merge
+
+        section_title("Merge Into Base Branches", "🔁")
+        console.print(Panel.fit(f"Strategy: {base_branch_strategy}", border_style="cyan"))
+        merge.main(root_dirs)
+        return True
+
+    if choice == "3":
+        show_review_placeholder()
+        return True
+
+    if choice == "4":
+        from core.changelog import update_all_repos_interactive
+
+        section_title("Update Changelogs", "📝")
+        update_all_repos_interactive(root_dirs)
+        return True
+
+    if choice == "5":
+        import core.sync as sync
+
+        section_title("Sync Base Branches", "⏳")
+        console.print(Panel.fit(sync.describe_sync_plan(), border_style="cyan"))
+        sync.main(root_dirs)
+        return True
+
+    return True
+
+
 def main(argv: list[str] | None = None) -> None:
     load_env_file()
     parser = build_parser()
     args = parser.parse_args(argv)
 
     from utils.common import set_dry_run
-    from utils.console import ask_yes_no
-    from core.changelog import update_all_repos_interactive
-    from core.commit import auto_commit_all_repos
     from core.config import DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE, ROOT_DIRS, describe_base_branch_strategy
-    import core.merge as merge
-    import core.sync as sync
 
     if args.dry_run:
         set_dry_run(True)
@@ -124,30 +241,25 @@ def main(argv: list[str] | None = None) -> None:
     # Banner
     print(f"\n[bold green]{figlet_format('Dev Tools', font='slant')}[/]")
 
-    # --- STEP 1: AUTO-COMMIT ---
-    section_title(f"Auto-commit {DEFAULT_HEAD_BRANCH}", "🔧")
-    if ask_yes_no("Browse repos and run auto-commit ?", default="n"):
-        auto_commit_all_repos(ROOT_DIRS)
+    mode_label = "DRY RUN" if args.dry_run else "PRODUCTION"
+    base_branch_strategy = describe_base_branch_strategy(DEFAULT_REMOTE)
 
-    # --- STEP 2: MERGE ---
-    section_title("Merge Into Base Branches", "🔁")
-    merge_prompt = (
-        f"Merge {DEFAULT_HEAD_BRANCH} into each repo base branch ? "
-        f"Strategy: {describe_base_branch_strategy(DEFAULT_REMOTE)}."
-    )
-    if ask_yes_no(merge_prompt, default="n"):
-        merge.main(ROOT_DIRS)
-
-    # --- STEP 3: CHANGELOG ---
-    section_title("Update changelogs", "📝")
-    if ask_yes_no("Update changelogs ?", default="n"):
-        update_all_repos_interactive(ROOT_DIRS)
-
-    # --- STEP 4: SYNC BASE BRANCHES ---
-    section_title("Sync Base Branches", "⏳")
-    sync_prompt = sync.describe_sync_plan()
-    if ask_yes_no(sync_prompt, default="n"):
-        sync.main(ROOT_DIRS)
+    while True:
+        render_main_menu(
+            mode_label=mode_label,
+            root_dirs=ROOT_DIRS,
+            head_branch=DEFAULT_HEAD_BRANCH,
+            base_branch_strategy=base_branch_strategy,
+        )
+        choice = ask_main_action()
+        should_continue = run_selected_action(
+            choice,
+            root_dirs=ROOT_DIRS,
+            head_branch=DEFAULT_HEAD_BRANCH,
+            base_branch_strategy=base_branch_strategy,
+        )
+        if not should_continue:
+            break
 
     print(f"\n[bold cyan]{figlet_format('All Done!', font='slant')}[/]")
 
