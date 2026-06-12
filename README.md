@@ -26,6 +26,7 @@
         <li><a href="#installation">Installation</a></li>
         <li><a href="#configuration">Configuration</a></li>
         <li><a href="#usage">Usage</a></li>
+        <li><a href="#ai-code-workflows">AI Code Workflows</a></li>
         <li><a href="#tests">Tests</a></li>
       </ul>
     </li>
@@ -55,6 +56,8 @@ Dev Tools is a Python CLI runner designed to automate local Git workflows across
 
 - 🔧 Interactive auto-commit on the configured integration branch, with a message preview before validation.
 - 🤖 Ollama-assisted commit and Pull Request message generation, with heuristic fallback when the model is disabled or unavailable.
+- 🔎 AI-assisted code reviews that explain current changes, staged changes, branch diffs, commits, or a specific file in French.
+- 💬 Source comment suggestions with preview, explicit confirmation, dry-run support, and guarded file updates.
 - 🔀 Pull Request creation and auto-merge between the integration branch and the base branch through `gh`.
 - 📝 `CHANGELOG.md` updates generated from Conventional Commits, with semver release suggestions.
 - 🔄 Safe synchronization of local base branches, with `origin/HEAD` resolution, legacy fallback, and explicit override support.
@@ -132,6 +135,8 @@ Useful variables:
 - `DEVTOOLS_BASE_BRANCH`: forces the base branch instead of using automatic resolution.
 - `DEVTOOLS_REMOTE`: default Git remote.
 - `ENABLE_OLLAMA`: fully enables or disables Ollama integration.
+- `OLLAMA_MAX_REVIEW_DIFF_CHARS`: maximum review diff size sent to Ollama. Default: `12000`.
+- `OLLAMA_MAX_REVIEW_FILE_CHARS`: maximum specific-file content size sent to Ollama. Default: `14000`.
 - `OLLAMA_ALLOW_REMOTE` and `OLLAMA_ALLOW_REMOTE_CONTEXT`: explicit opt-in for remote hosts.
 
 <a name="usage"></a>
@@ -152,7 +157,45 @@ Execution rules:
 
 - `--dry-run` and `--prod` are mutually exclusive.
 - One of them is required.
-- The runner proposes steps in this order: auto-commit, merge into the base branch, changelog update, base branch synchronization.
+- The main menu lets you start Auto Commit, Merge, Review Code, Comment Code, Changelog, or Sync independently.
+- Review Code never modifies source files.
+- Comment Code always previews suggestions and asks for confirmation before applying them.
+- In `--dry-run` mode, confirmed comments are simulated and no source file is written.
+
+<a name="ai-code-workflows"></a>
+### 🔎 AI Code Workflows
+
+Both workflows first ask you to select a repository and then a code scope:
+
+- **Current changes**: unstaged worktree changes.
+- **Staged changes**: changes prepared for the next commit.
+- **Compare with a branch**: diff between a base branch and `HEAD`.
+- **Specific commit/ref**: changes introduced by an older commit or Git ref.
+- **Specific file path**: current content and worktree diff for one repository-relative file.
+
+#### Review Code
+
+Review Code sends the selected context to Ollama and generates a French explanation covering the purpose, technical context, important files, behavior, points to verify, and potential risks. This workflow is read-only.
+
+#### Comment Code
+
+Comment Code asks Ollama for a small number of high-value source comments. Each suggestion includes a target file, a unique anchor, an insertion position, and the complete comment text.
+
+Before writing anything, the CLI displays every suggestion and asks:
+
+```text
+Apply these comments to source files? (y/N)
+```
+
+Application is intentionally conservative:
+
+- Only supported source files already present in the selected context can be modified.
+- Sensitive files, lockfiles, binary assets, and paths outside the repository are rejected.
+- Missing or ambiguous anchors are skipped rather than guessed.
+- Existing identical comments are not inserted again.
+- Each suggestion is reported as applied, simulated, skipped, or failed.
+
+Ollama is local by default. Sending Git or file context to a remote Ollama host requires both `OLLAMA_ALLOW_REMOTE=1` and `OLLAMA_ALLOW_REMOTE_CONTEXT=1`.
 
 <a name="tests"></a>
 ### 🧪 Tests
