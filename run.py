@@ -4,11 +4,10 @@ from pathlib import Path
 
 from pyfiglet import figlet_format
 from rich import print
-from rich import box
 from rich.console import Console
-from rich.panel import Panel
 from rich.prompt import Prompt
-from rich.table import Table
+
+from utils.console import ui_panel, ui_table
 
 console = Console()
 MENU_CHOICES = ("1", "2", "3", "4", "5", "6", "q")
@@ -106,7 +105,13 @@ Notes:
 
 def section_title(title: str, emoji: str) -> None:
     print("\n")
-    console.print(Panel.fit(f"{emoji}  {title.upper()}", style="bold green", border_style="cyan"))
+    console.print(
+        ui_panel(
+            f"{emoji}  [bold white]{title.upper()}[/]",
+            title="Workflow",
+            compact=True,
+        )
+    )
 
 
 def render_main_menu(
@@ -120,43 +125,32 @@ def render_main_menu(
     root_label = "root" if root_count == 1 else "roots"
 
     console.print(
-        Panel(
+        ui_panel(
             (
-                "[bold white]Choose a workflow and keep moving.[/]\n"
-                f"[dim]Mode:[/] {mode_label}  "
-                f"[dim]Head branch:[/] [cyan]{head_branch}[/]  "
-                f"[dim]Repository roots:[/] [cyan]{root_count} {root_label}[/]\n"
-                f"[dim]Base branch strategy:[/] {base_branch_strategy}"
+                f"[bold white]{mode_label}[/]  [dim]·[/]  "
+                f"[cyan]{root_count} {root_label}[/]  [dim]·[/]  "
+                f"head [cyan]{head_branch}[/]\n"
+                f"[dim]Base branch: {base_branch_strategy}[/]"
             ),
-            title="[bold cyan]Dev Tools Control Deck[/]",
-            border_style="cyan",
-            padding=(1, 2),
+            title="Dev Tools Control Deck",
         )
     )
 
-    table = Table(
-        box=box.ROUNDED,
-        show_lines=False,
-        header_style="bold cyan",
-        border_style="bright_black",
+    table = ui_table(
+        title="Choose a workflow",
+        caption="Enter a key, or q to quit.",
     )
     table.add_column("Key", justify="center", style="bold cyan", no_wrap=True)
     table.add_column("Workflow", style="bold white", no_wrap=True)
     table.add_column("What it does", style="white")
-    table.add_column("Status", justify="center", no_wrap=True)
 
-    table.add_row("1", "Auto Commit", "Scan repositories, build commit messages, then commit/push after confirmation.", "[green]Ready[/]")
-    table.add_row("2", "Merge", "Create and auto-merge release PRs into resolved base branches.", "[green]Ready[/]")
-    table.add_row("3", "Review Code", "Explain selected code context in French without changing files.", "[cyan]Ready[/]")
-    table.add_row(
-        "4",
-        "Comment Code",
-        "Preview and optionally apply AI-assisted source comments.",
-        "[green]Ready[/]",
-    )
-    table.add_row("5", "Changelog", "Update changelogs from Conventional Commits.", "[green]Ready[/]")
-    table.add_row("6", "Sync", "Checkout and fast-forward local base branches.", "[green]Ready[/]")
-    table.add_row("q", "Quit", "Leave the tool without running another workflow.", "[dim]Exit[/]")
+    table.add_row("1", "Auto Commit", "Build, confirm, commit and push staged changes.")
+    table.add_row("2", "Merge", "Create and auto-merge release pull requests.")
+    table.add_row("3", "Review Code", "Explain selected code context in French.")
+    table.add_row("4", "Comment Code", "Preview and optionally apply source comments.")
+    table.add_row("5", "Changelog", "Update changelogs from Conventional Commits.")
+    table.add_row("6", "Sync", "Fast-forward local base branches.")
+    table.add_row("q", "Quit", "Return to your shell.")
 
     console.print(table)
 
@@ -171,20 +165,9 @@ def ask_main_action() -> str:
 
 
 def render_repository_picker(repositories: list[tuple[str, str]]) -> None:
-    console.print(
-        Panel(
-            "Pick the repository that contains the code you want to inspect.",
-            title="[bold cyan]Step 1/2: Repository[/]",
-            border_style="cyan",
-            padding=(1, 2),
-        )
-    )
-
-    table = Table(
-        box=box.ROUNDED,
-        show_lines=False,
-        header_style="bold cyan",
-        border_style="bright_black",
+    table = ui_table(
+        title="Step 1/2 · Repository",
+        caption="Select the repository containing the code to inspect.",
     )
     table.add_column("Key", justify="center", style="bold cyan", no_wrap=True)
     table.add_column("Repository", style="bold white", no_wrap=True)
@@ -204,11 +187,10 @@ def ask_review_repository(repositories: list[tuple[str, str]]) -> tuple[str, str
     if len(repositories) == 1:
         repo_name, repo_path = repositories[0]
         console.print(
-            Panel(
+            ui_panel(
                 f"[bold white]Repository:[/] [cyan]{repo_name}[/]\n[dim]{repo_path}[/]",
-                title="[bold cyan]Repository Selected[/]",
-                border_style="cyan",
-                padding=(1, 2),
+                title="Step 1/2 · Repository",
+                compact=True,
             )
         )
         return repositories[0]
@@ -228,26 +210,20 @@ def ask_review_repository(repositories: list[tuple[str, str]]) -> tuple[str, str
 
 
 def render_review_target_menu() -> None:
-    console.print(
-        Panel(
-            (
-                "[bold cyan]1[/]  Current changes [dim](recommended)[/]\n"
-                "   Best when you stopped coding and want to understand what is in progress.\n\n"
-                "[bold cyan]2[/]  Staged changes\n"
-                "   Inspect only what is already prepared for the next commit.\n\n"
-                "[bold cyan]3[/]  Compare with a branch\n"
-                "   Use this for a feature branch, for example main...HEAD.\n\n"
-                "[bold cyan]4[/]  A specific commit/ref\n"
-                "   Use this when you want to explain an older commit, for example HEAD~1.\n\n"
-                "[bold cyan]5[/]  A specific file path\n"
-                "   Focus on one file by typing its relative path.\n\n"
-                "[bold cyan]q[/]  Back"
-            ),
-            title="[bold cyan]Step 2/2: Scope[/]",
-            border_style="cyan",
-            padding=(1, 2),
-        )
+    table = ui_table(
+        title="Step 2/2 · Scope",
+        caption="Current changes are recommended when resuming unfinished work.",
     )
+    table.add_column("Key", justify="center", style="bold cyan", no_wrap=True)
+    table.add_column("Scope", style="bold white", no_wrap=True)
+    table.add_column("Use when", style="white")
+    table.add_row("1", "Current changes", "You want to understand unfinished work.")
+    table.add_row("2", "Staged changes", "You only want the next commit content.")
+    table.add_row("3", "Compare with branch", "You want a feature branch overview.")
+    table.add_row("4", "Specific commit/ref", "You want to revisit older work.")
+    table.add_row("5", "Specific file", "You want focused file context.")
+    table.add_row("q", "Back", "Return to the main menu.")
+    console.print(table)
 
 
 def ask_review_target() -> tuple[str, str | None] | None:
@@ -288,16 +264,15 @@ def render_review_setup(repo_name: str, context) -> None:
     file_count = len(context.files)
     file_label = "file" if file_count == 1 else "files"
     console.print(
-        Panel(
+        ui_panel(
             (
                 f"[bold white]Repository:[/] [cyan]{repo_name}[/]\n"
                 f"[bold white]Scope:[/] {context.label}\n"
-                f"[bold white]Changed files:[/] [cyan]{file_count} {file_label}[/]\n\n"
-                "[dim]Generating a French explanation only. Source files will not be modified.[/]"
+                f"[bold white]Files:[/] [cyan]{file_count} {file_label}[/]\n"
+                "[dim]Read-only · French output[/]"
             ),
-            title="[bold cyan]Review Setup[/]",
-            border_style="cyan",
-            padding=(1, 2),
+            title="Review Setup",
+            compact=True,
         )
     )
 
@@ -308,7 +283,7 @@ def render_code_review_explanation(repo_name: str, context, explanation) -> None
         files_label += f", +{len(context.files) - 5} more"
 
     console.print(
-        Panel(
+        ui_panel(
             (
                 f"[bold white]Repository:[/] [cyan]{repo_name}[/]\n"
                 f"[bold white]Scope:[/] {context.label}\n"
@@ -317,30 +292,21 @@ def render_code_review_explanation(repo_name: str, context, explanation) -> None
                 f"{explanation.overview or 'Aucune synthèse fournie.'}\n\n"
                 f"{explanation.technical_context or ''}"
             ).strip(),
-            title="[bold cyan]Review Result[/]",
-            border_style="cyan",
-            padding=(1, 2),
+            title="Review Result",
         )
     )
 
     sections = [
-        ("Important Files", explanation.important_files),
-        ("Behavior", explanation.behavior),
-        ("Points To Check", explanation.points_to_check),
-        ("Risks", explanation.risks),
+        ("Important Files", explanation.important_files, "info"),
+        ("Behavior", explanation.behavior, "success"),
+        ("Points To Check", explanation.points_to_check, "warning"),
+        ("Risks", explanation.risks, "danger"),
     ]
-    for title, items in sections:
+    for title, items, tone in sections:
         if not items:
             continue
         body = "\n".join(f"- {item}" for item in items)
-        console.print(
-            Panel(
-                body,
-                title=f"[bold green]{title}[/]",
-                border_style="green",
-                padding=(1, 2),
-            )
-        )
+        console.print(ui_panel(body, title=title, tone=tone))
 
 
 def render_comment_plan(repo_name: str, context, plan) -> None:
@@ -349,33 +315,30 @@ def render_comment_plan(repo_name: str, context, plan) -> None:
         files_label += f", +{len(context.files) - 5} more"
 
     console.print(
-        Panel(
+        ui_panel(
             (
                 f"[bold white]Repository:[/] [cyan]{repo_name}[/]\n"
                 f"[bold white]Target:[/] {context.label}\n"
                 f"[bold white]Changed files:[/] {files_label}\n\n"
                 f"{plan.summary or 'No summary provided.'}"
             ),
-            title="[bold cyan]Comment Preview[/]",
-            border_style="cyan",
-            padding=(1, 2),
+            title="Comment Preview",
         )
     )
 
     if not plan.has_comments:
         console.print(
-            Panel(
+            ui_panel(
                 "No useful code comments were proposed for this context.",
-                title="[bold yellow]No Comments Proposed[/]",
-                border_style="yellow",
-                padding=(1, 2),
+                title="No Comments Proposed",
+                tone="warning",
             )
         )
         return
 
     for index, suggestion in enumerate(plan.comments, start=1):
         console.print(
-            Panel(
+            ui_panel(
                 (
                     f"[bold white]File:[/] [cyan]{suggestion.file}[/]\n"
                     f"[bold white]Placement:[/] {suggestion.placement} anchor\n"
@@ -383,29 +346,23 @@ def render_comment_plan(repo_name: str, context, plan) -> None:
                     f"[bold white]Comment to insert:[/]\n{suggestion.comment}\n\n"
                     f"[bold white]Why:[/] {suggestion.reason or 'Not specified.'}"
                 ),
-                title=f"[bold green]Suggested Comment {index}[/]",
-                border_style="green",
-                padding=(1, 2),
+                title=f"Suggested Comment {index}",
+                tone="success",
             )
         )
 
     console.print(
-        Panel(
+        ui_panel(
             "Review each suggestion before applying. No source file has been modified yet.",
-            title="[bold magenta]Confirmation Required[/]",
-            border_style="magenta",
-            padding=(1, 2),
+            title="Confirmation Required",
+            tone="accent",
+            compact=True,
         )
     )
 
 
 def render_comment_application_report(report) -> None:
-    table = Table(
-        box=box.ROUNDED,
-        show_lines=True,
-        header_style="bold cyan",
-        border_style="bright_black",
-    )
+    table = ui_table(title="Application Report", show_lines=True)
     table.add_column("File", style="bold white", no_wrap=True)
     table.add_column("Status", justify="center", no_wrap=True)
     table.add_column("Details", style="white")
@@ -429,30 +386,29 @@ def render_comment_application_report(report) -> None:
     if report.modified_files:
         files = ", ".join(report.modified_files)
         console.print(
-            Panel(
+            ui_panel(
                 f"Updated source files: {files}",
-                title="[bold green]Comments Applied[/]",
-                border_style="green",
-                padding=(1, 2),
+                title="Comments Applied",
+                tone="success",
+                compact=True,
             )
         )
     elif report.simulated_files:
         files = ", ".join(report.simulated_files)
         console.print(
-            Panel(
+            ui_panel(
                 f"Dry-run only. Files that would be updated: {files}",
-                title="[bold cyan]Simulation Complete[/]",
-                border_style="cyan",
-                padding=(1, 2),
+                title="Simulation Complete",
+                compact=True,
             )
         )
     else:
         console.print(
-            Panel(
+            ui_panel(
                 "No source file was modified.",
-                title="[bold yellow]No Changes Applied[/]",
-                border_style="yellow",
-                padding=(1, 2),
+                title="No Changes Applied",
+                tone="warning",
+                compact=True,
             )
         )
 
@@ -469,11 +425,10 @@ def run_review_workflow(root_dirs: list[str]) -> None:
 
     if not repositories:
         console.print(
-            Panel(
+            ui_panel(
                 "No Git repositories were found in the configured root directories.",
-                title="[bold yellow]Nothing To Review[/]",
-                border_style="yellow",
-                padding=(1, 2),
+                title="Nothing To Review",
+                tone="warning",
             )
         )
         return
@@ -493,11 +448,10 @@ def run_review_workflow(root_dirs: list[str]) -> None:
         context = collect_review_context(repo_path, target, ref)
     except ReviewContextError as error:
         console.print(
-            Panel(
+            ui_panel(
                 str(error),
-                title="[bold red]Review Context Error[/]",
-                border_style="red",
-                padding=(1, 2),
+                title="Review Context Error",
+                tone="danger",
             )
         )
         return
@@ -528,11 +482,10 @@ def run_comment_workflow(root_dirs: list[str]) -> None:
 
     if not repositories:
         console.print(
-            Panel(
+            ui_panel(
                 "No Git repositories were found in the configured root directories.",
-                title="[bold yellow]Nothing To Comment[/]",
-                border_style="yellow",
-                padding=(1, 2),
+                title="Nothing To Comment",
+                tone="warning",
             )
         )
         return
@@ -552,11 +505,10 @@ def run_comment_workflow(root_dirs: list[str]) -> None:
         context = collect_review_context(repo_path, target, ref)
     except ReviewContextError as error:
         console.print(
-            Panel(
+            ui_panel(
                 str(error),
-                title="[bold red]Comment Context Error[/]",
-                border_style="red",
-                padding=(1, 2),
+                title="Comment Context Error",
+                tone="danger",
             )
         )
         return
@@ -570,11 +522,11 @@ def run_comment_workflow(root_dirs: list[str]) -> None:
         return
     if not ask_yes_no("Apply these comments to source files?", default="n"):
         console.print(
-            Panel(
+            ui_panel(
                 "Comment application cancelled. No source file was modified.",
-                title="[bold yellow]Cancelled[/]",
-                border_style="yellow",
-                padding=(1, 2),
+                title="Cancelled",
+                tone="warning",
+                compact=True,
             )
         )
         return
@@ -604,7 +556,7 @@ def run_selected_action(
         import core.merge as merge
 
         section_title("Merge Into Base Branches", "🔁")
-        console.print(Panel.fit(f"Strategy: {base_branch_strategy}", border_style="cyan"))
+        console.print(ui_panel(f"Strategy: {base_branch_strategy}", title="Merge Target", compact=True))
         merge.main(root_dirs)
         return True
 
@@ -627,7 +579,7 @@ def run_selected_action(
         import core.sync as sync
 
         section_title("Sync Base Branches", "⏳")
-        console.print(Panel.fit(sync.describe_sync_plan(), border_style="cyan"))
+        console.print(ui_panel(sync.describe_sync_plan(), title="Sync Plan", compact=True))
         sync.main(root_dirs)
         return True
 
@@ -644,10 +596,8 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.dry_run:
         set_dry_run(True)
-        console.print("\n🚀 [bold cyan][DRY-RUN MODE ENABLED][/]\n")
     elif args.prod:
         set_dry_run(False)
-        console.print("\n🚀 [bold green][PRODUCTION MODE - REAL EXECUTION][/]\n")
 
     # Banner
     print(f"\n[bold green]{figlet_format('Dev Tools', font='slant')}[/]")

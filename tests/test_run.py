@@ -55,7 +55,7 @@ class RunConfigTests(unittest.TestCase):
         self.assertIn("--dry-run", help_text)
         self.assertIn("--prod", help_text)
 
-    def test_render_main_menu_includes_ready_review_and_comment_entries(self) -> None:
+    def test_render_main_menu_includes_review_and_comment_without_status_noise(self) -> None:
         buffer = io.StringIO()
         test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
 
@@ -72,6 +72,8 @@ class RunConfigTests(unittest.TestCase):
         self.assertIn("Review Code", output)
         self.assertIn("Comment Code", output)
         self.assertIn("optionally apply", output)
+        self.assertNotIn("Status", output)
+        self.assertNotIn("Ready", output)
 
     def test_ask_main_action_returns_prompt_choice(self) -> None:
         with patch("run.Prompt.ask", return_value="3") as prompt:
