@@ -1,3 +1,4 @@
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from core.prompts import (
     CODE_REVIEW_SYSTEM,
     CODE_REVIEW_USER_TEMPLATE,
 )
-from utils.common import describe_command_failure, env_int, trim_text_middle
+from utils.common import describe_command_failure, env_int, is_dry_run, trim_text_middle
 from utils.git import git_command
 
 REVIEW_TARGET_WORKTREE = "worktree"
@@ -95,6 +96,10 @@ REVIEWABLE_TEXT_EXTENSIONS = COMMENTABLE_EXTENSIONS | {
     ".yml",
 }
 VALID_COMMENT_PLACEMENTS = {"before", "after"}
+COMMENT_APPLICATION_APPLIED = "applied"
+COMMENT_APPLICATION_DRY_RUN = "dry-run"
+COMMENT_APPLICATION_SKIPPED = "skipped"
+COMMENT_APPLICATION_FAILED = "failed"
 
 
 class ReviewContextError(RuntimeError):
@@ -164,6 +169,38 @@ class CodeReviewExplanation:
                 self.points_to_check,
                 self.risks,
             ]
+        )
+
+
+@dataclass(frozen=True)
+class ReviewCommentApplication:
+    suggestion: ReviewCommentSuggestion
+    status: str
+    message: str
+
+
+@dataclass(frozen=True)
+class ReviewCommentApplicationReport:
+    results: list[ReviewCommentApplication]
+
+    @property
+    def modified_files(self) -> list[str]:
+        return sorted(
+            {
+                result.suggestion.file
+                for result in self.results
+                if result.status == COMMENT_APPLICATION_APPLIED
+            }
+        )
+
+    @property
+    def simulated_files(self) -> list[str]:
+        return sorted(
+            {
+                result.suggestion.file
+                for result in self.results
+                if result.status == COMMENT_APPLICATION_DRY_RUN
+            }
         )
 
 
@@ -407,6 +444,174 @@ def _read_review_file(repo_path: str, relative_file_path: str) -> str:
         return file_path.read_text(encoding="utf-8")
     except UnicodeDecodeError as error:
         raise ReviewContextError(f"File is not valid UTF-8 text: {relative_file_path}") from error
+
+
+def _resolve_comment_file(repo_path: str, relative_file_path: str, allowed_files: set[str]) -> tuple[str, Path]:
+    normalized = _clean_relative_file_path(relative_file_path)
+    if normalized not in allowed_files:
+        raise ReviewContextError(f"File is outside the selected review context: {normalized}")
+    if not is_commentable_source_file(normalized):
+        raise ReviewContextError(f"Refusing to modify unsupported or sensitive file '{normalized}'.")
+
+    repo_root = Path(repo_path).resolve()
+    file_path = (repo_root / normalized).resolve()
+    try:
+        file_path.relative_to(repo_root)
+    except ValueError as error:
+        raise ReviewContextError("Comment file path cannot escape the repository.") from error
+
+    if not file_path.is_file():
+        raise ReviewContextError(f"File not found: {normalized}")
+    return normalized, file_path
+
+
+def _read_source_file(file_path: Path) -> str:
+    try:
+        with file_path.open("r", encoding="utf-8", newline="") as source_file:
+            return source_file.read()
+    except UnicodeDecodeError as error:
+        raise ReviewContextError(f"File is not valid UTF-8 text: {file_path.name}") from error
+
+
+def _write_source_file(file_path: Path, content: str) -> None:
+    with file_path.open("w", encoding="utf-8", newline="") as source_file:
+        source_file.write(content)
+
+
+def _line_indentation(content: str, position: int) -> str:
+    line_start = content.rfind("\n", 0, position) + 1
+    line_end = content.find("\n", line_start)
+    if line_end == -1:
+        line_end = len(content)
+    line = content[line_start:line_end].lstrip("\r")
+    return line[: len(line) - len(line.lstrip(" \t"))]
+
+
+def _next_line_indentation(content: str, position: int, fallback: str) -> str:
+    line_end = content.find("\n", position)
+    if line_end == -1 or line_end + 1 >= len(content):
+        return fallback
+
+    next_start = line_end + 1
+    next_end = content.find("\n", next_start)
+    if next_end == -1:
+        next_end = len(content)
+    next_line = content[next_start:next_end].lstrip("\r")
+    if not next_line.strip():
+        return fallback
+
+    indentation = next_line[: len(next_line) - len(next_line.lstrip(" \t"))]
+    return indentation if len(indentation) > len(fallback) else fallback
+
+
+def _format_comment(comment: str, indentation: str, newline: str) -> str:
+    dedented = textwrap.dedent(comment).strip()
+    lines = dedented.splitlines()
+    return newline.join(f"{indentation}{line.rstrip()}" if line.strip() else "" for line in lines)
+
+
+def _insert_comment(content: str, suggestion: ReviewCommentSuggestion) -> tuple[str | None, str]:
+    anchor = suggestion.anchor.strip()
+    comment = suggestion.comment.strip()
+    if not anchor or not comment:
+        return None, "Anchor or comment is empty."
+    if comment in content:
+        return None, "Comment already exists in the file."
+
+    occurrence_count = content.count(anchor)
+    if occurrence_count == 0:
+        return None, "Anchor was not found."
+    if occurrence_count > 1:
+        return None, f"Anchor is ambiguous ({occurrence_count} matches)."
+
+    anchor_start = content.find(anchor)
+    anchor_end = anchor_start + len(anchor)
+    newline = "\r\n" if "\r\n" in content else "\n"
+    indentation = _line_indentation(content, anchor_start)
+
+    if suggestion.placement == "after":
+        indentation = _next_line_indentation(content, anchor_end, indentation)
+        line_end = content.find("\n", anchor_end)
+        if line_end == -1:
+            formatted = _format_comment(comment, indentation, newline)
+            separator = "" if content.endswith(("\n", "\r")) else newline
+            return f"{content}{separator}{formatted}", "Comment inserted after the anchor."
+
+        insert_at = line_end + 1
+        formatted = _format_comment(comment, indentation, newline)
+        return (
+            f"{content[:insert_at]}{formatted}{newline}{content[insert_at:]}",
+            "Comment inserted after the anchor.",
+        )
+
+    line_start = content.rfind("\n", 0, anchor_start) + 1
+    formatted = _format_comment(comment, indentation, newline)
+    return (
+        f"{content[:line_start]}{formatted}{newline}{content[line_start:]}",
+        "Comment inserted before the anchor.",
+    )
+
+
+def apply_review_comments(
+    repo_path: str,
+    context: ReviewContext,
+    plan: ReviewCommentPlan,
+) -> ReviewCommentApplicationReport:
+    allowed_files = {
+        _clean_relative_file_path(file_name)
+        for file_name in context.files
+        if is_commentable_source_file(file_name)
+    }
+    cached_contents: dict[Path, str] = {}
+    results: list[ReviewCommentApplication] = []
+
+    for suggestion in plan.comments:
+        try:
+            normalized, file_path = _resolve_comment_file(repo_path, suggestion.file, allowed_files)
+            content = cached_contents.get(file_path)
+            if content is None:
+                content = _read_source_file(file_path)
+
+            updated_content, message = _insert_comment(content, suggestion)
+            if updated_content is None:
+                results.append(
+                    ReviewCommentApplication(
+                        suggestion=suggestion,
+                        status=COMMENT_APPLICATION_SKIPPED,
+                        message=message,
+                    )
+                )
+                continue
+
+            cached_contents[file_path] = updated_content
+            if is_dry_run():
+                results.append(
+                    ReviewCommentApplication(
+                        suggestion=suggestion,
+                        status=COMMENT_APPLICATION_DRY_RUN,
+                        message=f"Would update {normalized}. {message}",
+                    )
+                )
+                continue
+
+            _write_source_file(file_path, updated_content)
+            results.append(
+                ReviewCommentApplication(
+                    suggestion=suggestion,
+                    status=COMMENT_APPLICATION_APPLIED,
+                    message=message,
+                )
+            )
+        except (OSError, ReviewContextError) as error:
+            results.append(
+                ReviewCommentApplication(
+                    suggestion=suggestion,
+                    status=COMMENT_APPLICATION_FAILED,
+                    message=str(error),
+                )
+            )
+
+    return ReviewCommentApplicationReport(results=results)
 
 
 def _build_file_context(repo_path: str, relative_file_path: str) -> ReviewContext:

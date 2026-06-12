@@ -5,6 +5,10 @@ from pathlib import Path
 from unittest.mock import call, patch
 
 from core.review import (
+    COMMENT_APPLICATION_APPLIED,
+    COMMENT_APPLICATION_DRY_RUN,
+    COMMENT_APPLICATION_FAILED,
+    COMMENT_APPLICATION_SKIPPED,
     CodeReviewFormatError,
     REVIEW_TARGET_FILE,
     DEFAULT_REVIEW_DIFF_MAX_CHARS,
@@ -16,7 +20,11 @@ from core.review import (
     CodeReviewExplanation,
     ReviewContext,
     ReviewContextError,
+    ReviewCommentApplicationReport,
     ReviewCommentFormatError,
+    ReviewCommentPlan,
+    ReviewCommentSuggestion,
+    apply_review_comments,
     build_code_review_explanation,
     build_review_comment_plan,
     collect_review_context,
@@ -436,6 +444,134 @@ class ReviewCommentGenerationTests(unittest.TestCase):
 
         self.assertEqual(plan.summary, "No AI code comments generated.")
         self.assertFalse(plan.has_comments)
+
+
+class ReviewCommentApplicationTests(unittest.TestCase):
+    def _context(self, repo_path: str, files: list[str] | None = None) -> ReviewContext:
+        return ReviewContext(
+            repo_path=repo_path,
+            target=REVIEW_TARGET_WORKTREE,
+            label="worktree changes",
+            files=files or ["src/app.py"],
+            diff="diff --git",
+        )
+
+    def _plan(
+        self,
+        *,
+        file_name: str = "src/app.py",
+        anchor: str = "def build_payload():",
+        placement: str = "before",
+        comment: str = "# Build the normalized payload before the API call.",
+    ) -> ReviewCommentPlan:
+        return ReviewCommentPlan(
+            summary="Comment plan",
+            comments=[
+                ReviewCommentSuggestion(
+                    file=file_name,
+                    anchor=anchor,
+                    placement=placement,
+                    comment=comment,
+                    reason="Clarifies non-obvious behavior.",
+                )
+            ],
+        )
+
+    def test_apply_review_comments_inserts_comment_before_unique_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            file_path = Path(tmp_dir) / "src" / "app.py"
+            file_path.parent.mkdir()
+            file_path.write_text("def build_payload():\n    return {}\n", encoding="utf-8")
+
+            with patch("core.review.is_dry_run", return_value=False):
+                report = apply_review_comments(tmp_dir, self._context(tmp_dir), self._plan())
+
+            content = file_path.read_text(encoding="utf-8")
+
+        self.assertIsInstance(report, ReviewCommentApplicationReport)
+        self.assertEqual(report.results[0].status, COMMENT_APPLICATION_APPLIED)
+        self.assertEqual(report.modified_files, ["src/app.py"])
+        self.assertTrue(content.startswith("# Build the normalized payload"))
+
+    def test_apply_review_comments_inserts_after_anchor_using_next_line_indentation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            file_path = Path(tmp_dir) / "src" / "app.py"
+            file_path.parent.mkdir()
+            file_path.write_text("def build_payload():\n    return {}\n", encoding="utf-8")
+            plan = self._plan(
+                placement="after",
+                comment="# Keep normalization inside this function.",
+            )
+
+            with patch("core.review.is_dry_run", return_value=False):
+                report = apply_review_comments(tmp_dir, self._context(tmp_dir), plan)
+
+            content = file_path.read_text(encoding="utf-8")
+
+        self.assertEqual(report.results[0].status, COMMENT_APPLICATION_APPLIED)
+        self.assertIn(
+            "def build_payload():\n    # Keep normalization inside this function.\n    return {}",
+            content,
+        )
+
+    def test_apply_review_comments_dry_run_does_not_write_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            file_path = Path(tmp_dir) / "src" / "app.py"
+            file_path.parent.mkdir()
+            original = "def build_payload():\n    return {}\n"
+            file_path.write_text(original, encoding="utf-8")
+
+            with patch("core.review.is_dry_run", return_value=True):
+                report = apply_review_comments(tmp_dir, self._context(tmp_dir), self._plan())
+
+            content = file_path.read_text(encoding="utf-8")
+
+        self.assertEqual(content, original)
+        self.assertEqual(report.results[0].status, COMMENT_APPLICATION_DRY_RUN)
+        self.assertEqual(report.simulated_files, ["src/app.py"])
+
+    def test_apply_review_comments_skips_missing_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            file_path = Path(tmp_dir) / "src" / "app.py"
+            file_path.parent.mkdir()
+            original = "def other_function():\n    return {}\n"
+            file_path.write_text(original, encoding="utf-8")
+
+            with patch("core.review.is_dry_run", return_value=False):
+                report = apply_review_comments(tmp_dir, self._context(tmp_dir), self._plan())
+
+            content = file_path.read_text(encoding="utf-8")
+
+        self.assertEqual(content, original)
+        self.assertEqual(report.results[0].status, COMMENT_APPLICATION_SKIPPED)
+        self.assertIn("not found", report.results[0].message)
+
+    def test_apply_review_comments_skips_ambiguous_anchor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            file_path = Path(tmp_dir) / "src" / "app.py"
+            file_path.parent.mkdir()
+            original = "value = normalize()\nvalue = normalize()\n"
+            file_path.write_text(original, encoding="utf-8")
+            plan = self._plan(anchor="value = normalize()")
+
+            with patch("core.review.is_dry_run", return_value=False):
+                report = apply_review_comments(tmp_dir, self._context(tmp_dir), plan)
+
+        self.assertEqual(report.results[0].status, COMMENT_APPLICATION_SKIPPED)
+        self.assertIn("ambiguous", report.results[0].message)
+
+    def test_apply_review_comments_rejects_file_outside_selected_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            file_path = Path(tmp_dir) / "src" / "other.py"
+            file_path.parent.mkdir()
+            file_path.write_text("def build_payload():\n    return {}\n", encoding="utf-8")
+            plan = self._plan(file_name="src/other.py")
+
+            with patch("core.review.is_dry_run", return_value=False):
+                report = apply_review_comments(tmp_dir, self._context(tmp_dir), plan)
+
+        self.assertEqual(report.results[0].status, COMMENT_APPLICATION_FAILED)
+        self.assertIn("outside the selected review context", report.results[0].message)
 
 
 class CodeReviewExplanationTests(unittest.TestCase):
