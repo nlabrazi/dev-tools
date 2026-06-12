@@ -148,7 +148,12 @@ def render_main_menu(
     table.add_row("1", "Auto Commit", "Scan repositories, build commit messages, then commit/push after confirmation.", "[green]Ready[/]")
     table.add_row("2", "Merge", "Create and auto-merge release PRs into resolved base branches.", "[green]Ready[/]")
     table.add_row("3", "Review Code", "Explain selected code context in French without changing files.", "[cyan]Ready[/]")
-    table.add_row("4", "Comment Code", "Preview AI-assisted source comments for selected code.", "[cyan]Preview[/]")
+    table.add_row(
+        "4",
+        "Comment Code",
+        "Preview and optionally apply AI-assisted source comments.",
+        "[green]Ready[/]",
+    )
     table.add_row("5", "Changelog", "Update changelogs from Conventional Commits.", "[green]Ready[/]")
     table.add_row("6", "Sync", "Checkout and fast-forward local base branches.", "[green]Ready[/]")
     table.add_row("q", "Quit", "Leave the tool without running another workflow.", "[dim]Exit[/]")
@@ -386,12 +391,70 @@ def render_comment_plan(repo_name: str, context, plan) -> None:
 
     console.print(
         Panel(
-            "Preview only. No source file was modified.",
-            title="[bold magenta]Safe Mode[/]",
+            "Review each suggestion before applying. No source file has been modified yet.",
+            title="[bold magenta]Confirmation Required[/]",
             border_style="magenta",
             padding=(1, 2),
         )
     )
+
+
+def render_comment_application_report(report) -> None:
+    table = Table(
+        box=box.ROUNDED,
+        show_lines=True,
+        header_style="bold cyan",
+        border_style="bright_black",
+    )
+    table.add_column("File", style="bold white", no_wrap=True)
+    table.add_column("Status", justify="center", no_wrap=True)
+    table.add_column("Details", style="white")
+
+    status_styles = {
+        "applied": "green",
+        "dry-run": "cyan",
+        "skipped": "yellow",
+        "failed": "red",
+    }
+    for result in report.results:
+        style = status_styles.get(result.status, "white")
+        table.add_row(
+            result.suggestion.file,
+            f"[{style}]{result.status.upper()}[/]",
+            result.message,
+        )
+
+    console.print(table)
+
+    if report.modified_files:
+        files = ", ".join(report.modified_files)
+        console.print(
+            Panel(
+                f"Updated source files: {files}",
+                title="[bold green]Comments Applied[/]",
+                border_style="green",
+                padding=(1, 2),
+            )
+        )
+    elif report.simulated_files:
+        files = ", ".join(report.simulated_files)
+        console.print(
+            Panel(
+                f"Dry-run only. Files that would be updated: {files}",
+                title="[bold cyan]Simulation Complete[/]",
+                border_style="cyan",
+                padding=(1, 2),
+            )
+        )
+    else:
+        console.print(
+            Panel(
+                "No source file was modified.",
+                title="[bold yellow]No Changes Applied[/]",
+                border_style="yellow",
+                padding=(1, 2),
+            )
+        )
 
 
 def run_review_workflow(root_dirs: list[str]) -> None:
@@ -449,7 +512,13 @@ def run_review_workflow(root_dirs: list[str]) -> None:
 
 def run_comment_workflow(root_dirs: list[str]) -> None:
     from core.repositories import iter_git_repositories
-    from core.review import ReviewContextError, collect_review_context, generate_review_comments
+    from core.review import (
+        ReviewContextError,
+        apply_review_comments,
+        collect_review_context,
+        generate_review_comments,
+    )
+    from utils.console import ask_yes_no
 
     section_title("Comment Code", "💬")
 
@@ -496,6 +565,22 @@ def run_comment_workflow(root_dirs: list[str]) -> None:
         plan = generate_review_comments(repo_name, context)
 
     render_comment_plan(repo_name, context, plan)
+
+    if not plan.has_comments:
+        return
+    if not ask_yes_no("Apply these comments to source files?", default="n"):
+        console.print(
+            Panel(
+                "Comment application cancelled. No source file was modified.",
+                title="[bold yellow]Cancelled[/]",
+                border_style="yellow",
+                padding=(1, 2),
+            )
+        )
+        return
+
+    report = apply_review_comments(repo_path, context, plan)
+    render_comment_application_report(report)
 
 
 def run_selected_action(

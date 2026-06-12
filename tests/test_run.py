@@ -8,7 +8,15 @@ from unittest.mock import patch
 
 from rich.console import Console
 
-from core.review import CodeReviewExplanation, ReviewCommentPlan, ReviewCommentSuggestion, ReviewContext
+from core.review import (
+    COMMENT_APPLICATION_APPLIED,
+    CodeReviewExplanation,
+    ReviewCommentApplication,
+    ReviewCommentApplicationReport,
+    ReviewCommentPlan,
+    ReviewCommentSuggestion,
+    ReviewContext,
+)
 import run
 
 
@@ -47,7 +55,7 @@ class RunConfigTests(unittest.TestCase):
         self.assertIn("--dry-run", help_text)
         self.assertIn("--prod", help_text)
 
-    def test_render_main_menu_includes_review_placeholder_entry(self) -> None:
+    def test_render_main_menu_includes_ready_review_and_comment_entries(self) -> None:
         buffer = io.StringIO()
         test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
 
@@ -63,7 +71,7 @@ class RunConfigTests(unittest.TestCase):
         self.assertIn("Dev Tools Control Deck", output)
         self.assertIn("Review Code", output)
         self.assertIn("Comment Code", output)
-        self.assertIn("Preview", output)
+        self.assertIn("optionally apply", output)
 
     def test_ask_main_action_returns_prompt_choice(self) -> None:
         with patch("run.Prompt.ask", return_value="3") as prompt:
@@ -164,7 +172,35 @@ class RunConfigTests(unittest.TestCase):
         output = buffer.getvalue()
         self.assertIn("Comment Preview", output)
         self.assertIn("Suggested Comment 1", output)
-        self.assertIn("Preview only", output)
+        self.assertIn("Confirmation Required", output)
+
+    def test_render_comment_application_report_outputs_modified_files(self) -> None:
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+        suggestion = ReviewCommentSuggestion(
+            file="src/app.ts",
+            anchor="function buildPayload(input) {",
+            placement="before",
+            comment="// Normalize before signing.",
+            reason="Order-sensitive behavior.",
+        )
+        report = ReviewCommentApplicationReport(
+            results=[
+                ReviewCommentApplication(
+                    suggestion=suggestion,
+                    status=COMMENT_APPLICATION_APPLIED,
+                    message="Comment inserted before the anchor.",
+                )
+            ]
+        )
+
+        with patch("run.console", test_console):
+            run.render_comment_application_report(report)
+
+        output = buffer.getvalue()
+        self.assertIn("APPLIED", output)
+        self.assertIn("Comments Applied", output)
+        self.assertIn("src/app.ts", output)
 
     def test_run_review_workflow_collects_generates_and_renders_explanation(self) -> None:
         context = ReviewContext(
@@ -250,6 +286,121 @@ class RunConfigTests(unittest.TestCase):
         collect_review_context.assert_called_once_with("/tmp/repo", "worktree", None)
         generate_review_comments.assert_called_once_with("repo", context)
         render_comment_plan.assert_called_once_with("repo", context, plan)
+
+    def test_run_comment_workflow_applies_confirmed_comments(self) -> None:
+        context = ReviewContext(
+            repo_path="/tmp/repo",
+            target="worktree",
+            label="worktree changes",
+            files=["src/app.ts"],
+            diff="diff --git",
+        )
+        suggestion = ReviewCommentSuggestion(
+            file="src/app.ts",
+            anchor="function buildPayload(input) {",
+            placement="before",
+            comment="// Normalize before signing.",
+            reason="Order-sensitive behavior.",
+        )
+        plan = ReviewCommentPlan(summary="Summary", comments=[suggestion])
+        report = ReviewCommentApplicationReport(
+            results=[
+                ReviewCommentApplication(
+                    suggestion=suggestion,
+                    status=COMMENT_APPLICATION_APPLIED,
+                    message="Comment inserted before the anchor.",
+                )
+            ]
+        )
+
+        with patch(
+            "core.repositories.iter_git_repositories",
+            return_value=[("repo", "/tmp/repo")],
+        ), patch(
+            "run.ask_review_repository",
+            return_value=("repo", "/tmp/repo"),
+        ), patch(
+            "run.ask_review_target",
+            return_value=("worktree", None),
+        ), patch(
+            "core.review.collect_review_context",
+            return_value=context,
+        ), patch(
+            "core.review.generate_review_comments",
+            return_value=plan,
+        ), patch(
+            "core.review.apply_review_comments",
+            return_value=report,
+        ) as apply_review_comments, patch(
+            "utils.console.ask_yes_no",
+            return_value=True,
+        ) as ask_yes_no, patch(
+            "run.render_comment_plan"
+        ), patch(
+            "run.render_comment_application_report"
+        ) as render_comment_application_report, patch(
+            "run.console.status",
+            return_value=nullcontext(),
+        ), patch("run.section_title"):
+            run.run_comment_workflow(["/tmp/root"])
+
+        ask_yes_no.assert_called_once_with(
+            "Apply these comments to source files?",
+            default="n",
+        )
+        apply_review_comments.assert_called_once_with("/tmp/repo", context, plan)
+        render_comment_application_report.assert_called_once_with(report)
+
+    def test_run_comment_workflow_does_not_apply_cancelled_comments(self) -> None:
+        context = ReviewContext(
+            repo_path="/tmp/repo",
+            target="worktree",
+            label="worktree changes",
+            files=["src/app.ts"],
+            diff="diff --git",
+        )
+        plan = ReviewCommentPlan(
+            summary="Summary",
+            comments=[
+                ReviewCommentSuggestion(
+                    file="src/app.ts",
+                    anchor="function buildPayload(input) {",
+                    placement="before",
+                    comment="// Normalize before signing.",
+                    reason="Order-sensitive behavior.",
+                )
+            ],
+        )
+
+        with patch(
+            "core.repositories.iter_git_repositories",
+            return_value=[("repo", "/tmp/repo")],
+        ), patch(
+            "run.ask_review_repository",
+            return_value=("repo", "/tmp/repo"),
+        ), patch(
+            "run.ask_review_target",
+            return_value=("worktree", None),
+        ), patch(
+            "core.review.collect_review_context",
+            return_value=context,
+        ), patch(
+            "core.review.generate_review_comments",
+            return_value=plan,
+        ), patch(
+            "core.review.apply_review_comments",
+        ) as apply_review_comments, patch(
+            "utils.console.ask_yes_no",
+            return_value=False,
+        ), patch(
+            "run.render_comment_plan"
+        ), patch(
+            "run.console.status",
+            return_value=nullcontext(),
+        ), patch("run.section_title"), patch("run.console.print"):
+            run.run_comment_workflow(["/tmp/root"])
+
+        apply_review_comments.assert_not_called()
 
     def test_run_selected_action_dispatches_review_workflow(self) -> None:
         with patch("run.run_review_workflow") as run_review_workflow:
