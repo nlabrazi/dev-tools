@@ -158,6 +158,7 @@ Execution rules:
 - `--dry-run` and `--prod` are mutually exclusive.
 - One of them is required.
 - The main menu lets you start Auto Commit, Merge, Review Code, Comment Code, Changelog, or Sync independently.
+- Auto Commit and Merge first let you select a repository, then run their usual workflow only on that repository.
 - Review Code never modifies source files.
 - Comment Code always previews suggestions and asks for confirmation before applying them.
 - In `--dry-run` mode, confirmed comments are simulated and no source file is written.

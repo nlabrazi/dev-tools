@@ -416,6 +416,62 @@ class RunConfigTests(unittest.TestCase):
         self.assertTrue(should_continue)
         run_review_workflow.assert_called_once_with(["/tmp/root"])
 
+    def test_commit_and_merge_dispatch_only_the_selected_repository(self) -> None:
+        for choice, workflow in [("1", "core.commit.auto_commit_all_repos"), ("2", "core.merge.main")]:
+            with self.subTest(choice=choice), patch(
+                "core.repositories.iter_git_repositories",
+                side_effect=[[("api", "/tmp/first/api")], [("web", "/tmp/second/web")]],
+            ), patch("run.Prompt.ask", return_value="2"), patch(workflow) as execute, patch(
+                "run.section_title"
+            ), patch("run.console.print"):
+                should_continue = run.run_selected_action(
+                    choice,
+                    root_dirs=["/tmp/first", "/tmp/second"],
+                    head_branch="staging",
+                    base_branch_strategy="strategy",
+                )
+
+                self.assertTrue(should_continue)
+                execute.assert_called_once_with(
+                    ["/tmp/first", "/tmp/second"], selected_repo_path="/tmp/second/web"
+                )
+
+    def test_commit_and_merge_return_without_action_when_selection_is_cancelled(self) -> None:
+        for choice, workflow in [("1", "core.commit.auto_commit_all_repos"), ("2", "core.merge.main")]:
+            with self.subTest(choice=choice), patch(
+                "core.repositories.iter_git_repositories",
+                return_value=[("api", "/tmp/api"), ("web", "/tmp/web")],
+            ), patch("run.Prompt.ask", return_value="q"), patch(workflow) as execute, patch(
+                "run.section_title"
+            ), patch("run.console.print"):
+                should_continue = run.run_selected_action(
+                    choice,
+                    root_dirs=["/tmp/root"],
+                    head_branch="staging",
+                    base_branch_strategy="strategy",
+                )
+
+                self.assertTrue(should_continue)
+                execute.assert_not_called()
+
+    def test_commit_and_merge_handle_no_repositories_without_action(self) -> None:
+        for choice, workflow in [("1", "core.commit.auto_commit_all_repos"), ("2", "core.merge.main")]:
+            with self.subTest(choice=choice), patch(
+                "core.repositories.iter_git_repositories", return_value=[]
+            ), patch("run.Prompt.ask") as prompt, patch(workflow) as execute, patch(
+                "run.section_title"
+            ), patch("run.console.print"):
+                should_continue = run.run_selected_action(
+                    choice,
+                    root_dirs=["/tmp/root"],
+                    head_branch="staging",
+                    base_branch_strategy="strategy",
+                )
+
+                self.assertTrue(should_continue)
+                prompt.assert_not_called()
+                execute.assert_not_called()
+
     def test_run_selected_action_dispatches_comment_workflow(self) -> None:
         with patch("run.run_comment_workflow") as run_comment_workflow:
             should_continue = run.run_selected_action(

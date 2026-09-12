@@ -2,7 +2,24 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from core.merge import create_and_merge_pr, get_pr_status
+from core.merge import create_and_merge_pr, get_pr_status, main
+
+
+class MergeSelectionTests(unittest.TestCase):
+    def test_merge_checks_and_processes_only_the_selected_repository(self) -> None:
+        with patch("core.merge.os.path.isdir", return_value=True), patch(
+            "core.merge.iter_git_repositories",
+            return_value=[("repo", "/tmp/first/repo"), ("repo", "/tmp/second/repo")],
+        ), patch(
+            "core.merge.resolve_merge_base_branch", return_value=("main", "resolved")
+        ) as resolve, patch("core.merge.repo_has_branch_diff", return_value=True) as has_diff, patch(
+            "core.merge.create_and_merge_pr"
+        ) as merge, patch("core.merge.console.print"), patch("core.merge.print"):
+            main(["/tmp/root"], selected_repo_path="/tmp/second/repo")
+
+        resolve.assert_called_once_with("/tmp/second/repo")
+        has_diff.assert_called_once_with("/tmp/second/repo", "main")
+        merge.assert_called_once_with("/tmp/second/repo", "repo", "main")
 
 
 class MergeDryRunTests(unittest.TestCase):

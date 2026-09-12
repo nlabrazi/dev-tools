@@ -176,7 +176,7 @@ def push_head_to_branch(repo_path: str, remote: str, branch: str) -> str:
     return "pushed"
 
 
-def auto_commit_all_repos(root_dirs: list[str]):
+def auto_commit_all_repos(root_dirs: list[str], *, selected_repo_path: str | None = None):
     print(f"\n🔄 Scanning repos in: {', '.join(root_dirs)}\n")
     results = {"committed": 0, "pushed": 0}
 
@@ -190,6 +190,8 @@ def auto_commit_all_repos(root_dirs: list[str]):
 
         for repo, repo_path in iter_git_repositories(root_dir):
             found_repos = True
+            if selected_repo_path is not None and repo_path != selected_repo_path:
+                continue
             use_worktree_diff = False
 
             # 1) Status first (key fix)
