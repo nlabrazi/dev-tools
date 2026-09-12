@@ -115,6 +115,18 @@ class CommitTargetTests(unittest.TestCase):
 
 
 class AutoCommitWorkflowTests(unittest.TestCase):
+    def test_auto_commit_checks_only_the_selected_repository(self) -> None:
+        with patch("core.commit.os.path.isdir", return_value=True), patch(
+            "core.commit.iter_git_repositories",
+            return_value=[("repo", "/tmp/first/repo"), ("repo", "/tmp/second/repo")],
+        ), patch("core.commit.git_status_porcelain", return_value=[]) as status, patch(
+            "core.commit.console.print"
+        ), patch("core.commit.print"):
+            results = auto_commit_all_repos(["/tmp/root"], selected_repo_path="/tmp/second/repo")
+
+        self.assertEqual(results, {"committed": 0, "pushed": 0})
+        status.assert_called_once_with("/tmp/second/repo")
+
     def test_auto_commit_all_repos_skips_when_target_validation_fails(self) -> None:
         with patch("core.commit.os.path.isdir", return_value=True), patch(
             "core.commit.iter_git_repositories",

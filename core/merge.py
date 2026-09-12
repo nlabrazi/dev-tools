@@ -362,7 +362,7 @@ def create_and_merge_pr(path: str, repo_name: str, base_branch: str | None = Non
         print(f"⚠️  Tagging step failed/skipped for {repo_name}: {e}")
 
 
-def main(root_dirs: list[str] = ROOT_DIRS) -> None:
+def main(root_dirs: list[str] = ROOT_DIRS, *, selected_repo_path: str | None = None) -> None:
     print(f"\n🔄 Scanning for repos with pending {DEFAULT_HEAD_BRANCH} → base branch merges\n")
 
     for root_dir in root_dirs:
@@ -375,6 +375,8 @@ def main(root_dirs: list[str] = ROOT_DIRS) -> None:
         found_repos = False
         for repo, path in iter_git_repositories(root_dir):
             found_repos = True
+            if selected_repo_path is not None and path != selected_repo_path:
+                continue
             base_branch, resolution = resolve_merge_base_branch(path)
             if not base_branch:
                 print(f"⚠️  {repo}: {resolution}.")

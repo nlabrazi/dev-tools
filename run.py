@@ -164,10 +164,15 @@ def ask_main_action() -> str:
     ).lower()
 
 
-def render_repository_picker(repositories: list[tuple[str, str]]) -> None:
+def render_repository_picker(
+    repositories: list[tuple[str, str]],
+    *,
+    title: str = "Step 1/2 · Repository",
+    caption: str = "Select the repository containing the code to inspect.",
+) -> None:
     table = ui_table(
-        title="Step 1/2 · Repository",
-        caption="Select the repository containing the code to inspect.",
+        title=title,
+        caption=caption,
     )
     table.add_column("Key", justify="center", style="bold cyan", no_wrap=True)
     table.add_column("Repository", style="bold white", no_wrap=True)
@@ -180,7 +185,12 @@ def render_repository_picker(repositories: list[tuple[str, str]]) -> None:
     console.print(table)
 
 
-def ask_review_repository(repositories: list[tuple[str, str]]) -> tuple[str, str] | None:
+def ask_repository(
+    repositories: list[tuple[str, str]],
+    *,
+    title: str = "Step 1/2 · Repository",
+    caption: str = "Select the repository containing the code to inspect.",
+) -> tuple[str, str] | None:
     if not repositories:
         return None
 
@@ -189,13 +199,13 @@ def ask_review_repository(repositories: list[tuple[str, str]]) -> tuple[str, str
         console.print(
             ui_panel(
                 f"[bold white]Repository:[/] [cyan]{repo_name}[/]\n[dim]{repo_path}[/]",
-                title="Step 1/2 · Repository",
+                title=title,
                 compact=True,
             )
         )
         return repositories[0]
 
-    render_repository_picker(repositories)
+    render_repository_picker(repositories, title=title, caption=caption)
     choices = [str(index) for index in range(1, len(repositories) + 1)] + ["q"]
     selected = Prompt.ask(
         "\n[bold white]Repository[/]",
@@ -207,6 +217,31 @@ def ask_review_repository(repositories: list[tuple[str, str]]) -> tuple[str, str
     if selected == "q":
         return None
     return repositories[int(selected) - 1]
+
+
+def ask_review_repository(repositories: list[tuple[str, str]]) -> tuple[str, str] | None:
+    return ask_repository(repositories)
+
+
+def ask_action_repository(root_dirs: list[str], action: str) -> tuple[str, str] | None:
+    from core.repositories import iter_git_repositories
+
+    repositories = [repo for root_dir in root_dirs for repo in iter_git_repositories(root_dir)]
+    if not repositories:
+        console.print(
+            ui_panel(
+                "No Git repositories were found in the configured root directories.",
+                title="No Repositories",
+                tone="warning",
+            )
+        )
+        return None
+
+    return ask_repository(
+        repositories,
+        title=f"{action} · Repository",
+        caption=f"Select the repository for {action}.",
+    )
 
 
 def render_review_target_menu() -> None:
@@ -549,7 +584,9 @@ def run_selected_action(
         from core.commit import auto_commit_all_repos
 
         section_title(f"Auto-Commit {head_branch}", "🔧")
-        auto_commit_all_repos(root_dirs)
+        selected_repo = ask_action_repository(root_dirs, "Auto Commit")
+        if selected_repo is not None:
+            auto_commit_all_repos(root_dirs, selected_repo_path=selected_repo[1])
         return True
 
     if choice == "2":
@@ -557,7 +594,9 @@ def run_selected_action(
 
         section_title("Merge Into Base Branches", "🔁")
         console.print(ui_panel(f"Strategy: {base_branch_strategy}", title="Merge Target", compact=True))
-        merge.main(root_dirs)
+        selected_repo = ask_action_repository(root_dirs, "Merge")
+        if selected_repo is not None:
+            merge.main(root_dirs, selected_repo_path=selected_repo[1])
         return True
 
     if choice == "3":
