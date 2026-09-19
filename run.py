@@ -205,6 +205,7 @@ def ask_repository(
         )
         return repositories[0]
 
+    repositories = sorted(repositories, key=lambda repo: repo[0].casefold())
     render_repository_picker(repositories, title=title, caption=caption)
     choices = [str(index) for index in range(1, len(repositories) + 1)] + ["q"]
     selected = Prompt.ask(
