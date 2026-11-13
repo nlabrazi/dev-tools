@@ -89,6 +89,7 @@ from core.maintenance.renovate import (
 )
 from core.maintenance.reporter import (
     format_executive_summary_text,
+    format_pr_decision_badge,
     format_report_json,
     format_report_markdown,
     render_audit_report,
@@ -98,6 +99,7 @@ from core.maintenance.reporter import (
     render_migration_plan,
     render_post_deploy_verification,
     render_production_environment_info,
+    render_project_dashboard,
     render_proposed_changes_preview,
     render_renovate_pr_analysis,
     render_risk_assessments,
@@ -167,6 +169,7 @@ __all__ = [
     "detect_project_stacks",
     "extract_release_notes_signals",
     "format_executive_summary_text",
+    "format_pr_decision_badge",
     "format_report_json",
     "format_report_markdown",
     "generate_migration_plan",
@@ -194,6 +197,7 @@ __all__ = [
     "render_migration_plan",
     "render_post_deploy_verification",
     "render_production_environment_info",
+    "render_project_dashboard",
     "render_proposed_changes_preview",
     "render_renovate_pr_analysis",
     "render_risk_assessments",

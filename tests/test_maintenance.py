@@ -32,6 +32,7 @@ from core.maintenance import (
     collect_declared_versions,
     detect_project_stacks,
     extract_release_notes_signals,
+    format_pr_decision_badge,
     format_report_json,
     format_report_markdown,
     generate_migration_plan,
@@ -55,6 +56,7 @@ from core.maintenance import (
     render_migration_plan,
     render_post_deploy_verification,
     render_production_environment_info,
+    render_project_dashboard,
     render_proposed_changes_preview,
     render_risk_assessments,
     render_validation_report,
@@ -584,11 +586,16 @@ class MigrationPlanGenerationTests(unittest.TestCase):
 
             buffer = io.StringIO()
             test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+            render_project_dashboard(report, target_console=test_console)
             render_risk_assessments(report.risk_assessments, target_console=test_console)
             render_migration_plan(plan, target_console=test_console)
             output = buffer.getvalue()
+            self.assertIn("État du Projet", output)
+            self.assertIn("PRs Renovate & Décisions de Bump", output)
             self.assertIn("Risk Classification & Target Versions", output)
             self.assertIn("Migration & Rollback Plan", output)
+            for idx, step in enumerate(plan.ordered_steps, start=1):
+                self.assertTrue(step.startswith(f"{idx}. "))
 
 
 class ControlledMigrationPreparationTests(unittest.TestCase):

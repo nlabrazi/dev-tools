@@ -173,51 +173,52 @@ def generate_migration_plan(
             ),
         )
 
-    ordered_steps: list[str] = []
+    raw_steps: list[str] = []
     gs = report.git_state
     base_branch = gs.base_branch or "master"
 
     if not gs.is_clean:
-        ordered_steps.append(
-            f"1. Nettoyer ou isoler les modifications locales sur '{gs.branch}' ({gs.staged_count} staged, {gs.unstaged_count} unstaged, {gs.untracked_count} untracked)."
+        raw_steps.append(
+            f"Nettoyer ou isoler les modifications locales sur '{gs.branch}' ({gs.staged_count} staged, {gs.unstaged_count} unstaged, {gs.untracked_count} untracked)."
         )
     else:
-        ordered_steps.append(
-            f"1. Vérifier que le dépôt est sur la branche d'intégration 'staging' (actuellement '{gs.branch}', propre)."
+        raw_steps.append(
+            f"Vérifier que le dépôt est sur la branche d'intégration 'staging' (actuellement '{gs.branch}', propre)."
         )
 
     if gs.untracked_venv_entries:
-        ordered_steps.append(
-            f"2. Ajouter {', '.join(gs.untracked_venv_entries)} dans '.git/info/exclude' pour éviter les fichiers non suivis liés aux environnements virtuels."
+        raw_steps.append(
+            f"Ajouter {', '.join(gs.untracked_venv_entries)} dans '.git/info/exclude' pour éviter les fichiers non suivis liés aux environnements virtuels."
         )
 
-    if not report.renovate_config.exists or any(pr.is_onboarding for pr in report.open_prs):
-        ordered_steps.append(
-            f"3. Aligner '{report.renovate_config.path}' avec le preset Dev Platform sur 'staging', puis fusionner 'staging -> {base_branch}' pour activer Renovate sur 'staging'."
+    if not report.renovate_config.exists or not report.renovate_config.extends_dev_platform or any(pr.is_onboarding for pr in report.open_prs):
+        raw_steps.append(
+            f"Aligner '{report.renovate_config.path}' avec le preset Dev Platform sur 'staging', puis fusionner 'staging -> {base_branch}' pour activer Renovate sur 'staging'."
         )
 
     drift_rows = [r for r in report.env_matrix if r.drift_status == DRIFT_PROBLEMATIC]
     if drift_rows:
         comps = ", ".join(f"{r.component} -> {target_versions.get(r.component, '?')}" for r in drift_rows)
-        ordered_steps.append(
-            f"4. Aligner les versions déclarées ({comps}) entre Local, GitHub Actions, Jenkins et Docker."
+        raw_steps.append(
+            f"Aligner les versions déclarées ({comps}) entre Local, GitHub Actions, Jenkins et Docker."
         )
 
     if gs.venv_exists and gs.venv_has_pip is False:
-        ordered_steps.append(
-            "5. Adapter le script de déploiement pour utiliser 'uv pip install --python \"$VENV_DIR/bin/python\"' (environnement .venv sans binaire pip)."
+        raw_steps.append(
+            "Adapter le script de déploiement pour utiliser 'uv pip install --python \"$VENV_DIR/bin/python\"' (environnement .venv sans binaire pip)."
         )
 
     non_onboarding_prs = [pr for pr in report.open_prs if not pr.is_onboarding]
     if non_onboarding_prs:
         pr_list = ", ".join(f"#{pr.number} ({pr.title})" for pr in non_onboarding_prs)
-        ordered_steps.append(
-            f"6. Examiner et fusionner séquentiellement les PRs Renovate vers 'staging' après validation CI : {pr_list}."
+        raw_steps.append(
+            f"Examiner et fusionner séquentiellement les PRs Renovate vers 'staging' après validation CI : {pr_list}."
         )
 
-    ordered_steps.append(
-        f"7. Une fois 'staging' validée par les tests et les pipelines CI, fusionner 'staging -> {base_branch}' puis préparer le déploiement en production avec sauvegarde de rollback."
+    raw_steps.append(
+        f"Une fois 'staging' validée par les tests et les pipelines CI, fusionner 'staging -> {base_branch}' puis préparer le déploiement en production avec sauvegarde de rollback."
     )
+    ordered_steps = [f"{idx}. {step}" for idx, step in enumerate(raw_steps, start=1)]
 
     validation_steps: list[str] = [
         "Exécuter la suite de tests unitaires et d'intégration localement (aucun test FAIL ; vérifier explicitement tout test SKIPPED).",

@@ -274,7 +274,7 @@ def _classify_environment_row(row: EnvironmentMatrixRow, report: AuditReport) ->
     uncertainties: list[str] = []
     if row.production == STATUS_UNKNOWN:
         uncertainties.append(
-            f"Production {row.component} version is UNKNOWN (no VPS probe configured in Phase 1/2)."
+            f"Production {row.component} version is UNKNOWN (non configurée localement)."
         )
 
     if row.drift_status == DRIFT_PROBLEMATIC:

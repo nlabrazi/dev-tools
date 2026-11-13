@@ -141,13 +141,6 @@ def audit_repository(
         if row.drift_status == DRIFT_PROBLEMATIC:
             has_problematic_drift = True
             reservations.append(f"{row.component}: {row.drift_details}")
-        if row.production == STATUS_UNKNOWN:
-            prod_note = "Production runtime versions are UNKNOWN (no VPS probe configured in Phase 1)."
-            if prod_note not in reservations:
-                reservations.append(prod_note)
-
-    if ci_summary.jenkins_file and ci_summary.jenkins_status == STATUS_UNKNOWN:
-        reservations.append("Jenkins build status is UNKNOWN locally (verify Jenkins pipeline is green).")
 
     has_blocked_or_breaking_pr = any(
         pr.analysis is not None and pr.analysis.risk_level in {RISK_BLOCKED, RISK_BREAKING}
