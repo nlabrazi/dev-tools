@@ -35,6 +35,15 @@ from core.maintenance.models import (
     RenovateUpdateItem,
     StackComponent,
 )
+from core.maintenance.renovate import (
+    analyze_renovate_pr,
+    build_fallback_pr_analysis,
+    inspect_ci_status,
+    inspect_dependency_dashboard,
+    inspect_open_renovate_prs,
+    inspect_single_renovate_pr,
+    parse_renovate_pr_body,
+)
 from core.maintenance.workflow import (
     ask_maintenance_action,
     render_maintenance_menu,
@@ -67,13 +76,20 @@ __all__ = [
     "STATUS_SKIPPED",
     "STATUS_UNKNOWN",
     "StackComponent",
+    "analyze_renovate_pr",
     "ask_maintenance_action",
     "build_environment_matrix",
+    "build_fallback_pr_analysis",
     "collect_declared_versions",
     "detect_deployment_files",
     "detect_project_stacks",
+    "inspect_ci_status",
+    "inspect_dependency_dashboard",
     "inspect_git_state",
+    "inspect_open_renovate_prs",
     "inspect_renovate_config",
+    "inspect_single_renovate_pr",
+    "parse_renovate_pr_body",
     "render_maintenance_menu",
     "run_dependency_maintenance_for_repo",
 ]

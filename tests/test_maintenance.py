@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,13 +10,24 @@ from core.maintenance import (
     DRIFT_ACCEPTED,
     DRIFT_ALIGNED,
     DRIFT_PROBLEMATIC,
+    RISK_BLOCKED,
+    RISK_BREAKING,
+    STATUS_FAIL,
+    STATUS_PASS,
     STATUS_UNKNOWN,
+    RenovateConfigInfo,
+    RenovatePRInfo,
+    RenovateUpdateItem,
+    analyze_renovate_pr,
     build_environment_matrix,
     collect_declared_versions,
     detect_project_stacks,
+    inspect_dependency_dashboard,
     inspect_git_state,
     inspect_renovate_config,
+    parse_renovate_pr_body,
 )
+from core.ollama import OllamaError
 from utils.common import set_dry_run
 
 
@@ -199,6 +211,153 @@ class EnvironmentMatrixTests(unittest.TestCase):
             self.assertEqual(node_row.docker, "24")
             self.assertEqual(node_row.jenkins, "24")
             self.assertEqual(node_row.drift_status, DRIFT_PROBLEMATIC)
+
+
+class RenovateAndOllamaPRTests(unittest.TestCase):
+    def test_parse_renovate_pr_body_extracts_updates_warnings_and_breaking_notes(self) -> None:
+        body = (
+            "This PR contains the following updates:\n\n"
+            "| Package | Change | Age | Confidence |\n"
+            "|---|---|---|---|\n"
+            "| [@playwright/test](https://playwright.dev) | [`1.63.0` → `1.65.0`](https://example.com) | age | conf |\n\n"
+            "> [!WARNING]\n> Some dependencies could not be looked up.\n\n"
+            "### Release Notes\n\n"
+            "#### Breaking changes ⚠️\n- `screen` property is now forwarded.\n\n"
+            "### Configuration\n"
+        )
+        updates, has_rn, has_warn, excerpt = parse_renovate_pr_body(
+            "chore(deps): update dependency @playwright/test to v1.65.0",
+            body,
+        )
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0].package, "@playwright/test")
+        self.assertEqual(updates[0].from_version, "1.63.0")
+        self.assertEqual(updates[0].to_version, "1.65.0")
+        self.assertEqual(updates[0].update_type, "minor")
+        self.assertTrue(has_rn)
+        self.assertTrue(has_warn)
+        self.assertIn("Breaking changes", excerpt)
+
+    def test_analyze_renovate_pr_uses_ollama_and_preserves_deterministic_drift_impacts(self) -> None:
+        pr = RenovatePRInfo(
+            number=23,
+            title="chore(deps): update dependency @playwright/test to v1.65.0",
+            head_branch="renovate/playwright-monorepo",
+            base_branch="staging",
+            ci_status=STATUS_PASS,
+            merge_state="CLEAN",
+            changed_files=["package-lock.json"],
+            updates=[
+                RenovateUpdateItem(
+                    package="@playwright/test",
+                    update_type="minor",
+                    from_version="1.63.0",
+                    to_version="1.65.0",
+                    raw_change="1.63.0 -> 1.65.0",
+                )
+            ],
+            has_release_notes=True,
+            has_renovate_warning=True,
+            release_notes_excerpt="### Release Notes\n#### Breaking changes ⚠️\n- screen forwarded",
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "Jenkinsfile").write_text(
+                "pipeline { agent { docker { image 'mcr.microsoft.com/playwright:v1.63.0-noble' } } }\n",
+                encoding="utf-8",
+            )
+            env_matrix = build_environment_matrix(tmp_dir, collect_declared_versions(tmp_dir))
+            renovate_cfg = RenovateConfigInfo(exists=True, valid_json=True, extends_dev_platform=True)
+
+            ollama_json = json.dumps(
+                {
+                    "pr_analysis": {
+                        "risk_level": "LOW RISK",
+                        "breaking_change": True,
+                        "breaking_summary": "Playwright 1.64 introduit un changement sur window.screen.",
+                        "summary": "Mise à jour de @playwright/test de 1.63.0 vers 1.65.0.",
+                        "key_changes": ["Support de Bun", "Changement sur window.screen"],
+                        "project_impacts": ["Impact sur les tests E2E."],
+                        "checks_before_merge": ["Vérifier la suite E2E."],
+                        "verdict": "Adapter Jenkinsfile avant de merger.",
+                    }
+                }
+            )
+
+            with patch("core.maintenance.renovate.is_ollama_enabled", return_value=True), patch(
+                "core.maintenance.renovate.ensure_repo_context_allowed"
+            ), patch("core.maintenance.renovate.chat_json", return_value=ollama_json):
+                analysis = analyze_renovate_pr("riftvision", tmp_dir, pr, env_matrix, renovate_cfg)
+
+        self.assertEqual(analysis.source, "ollama")
+        self.assertEqual(analysis.risk_level, RISK_BREAKING)
+        self.assertTrue(analysis.breaking_change)
+        self.assertIn("Playwright 1.64", analysis.breaking_summary)
+        self.assertTrue(any("1.63.0" in imp for imp in analysis.project_impacts))
+
+    def test_analyze_renovate_pr_falls_back_to_heuristic_when_ollama_fails(self) -> None:
+        pr = RenovatePRInfo(
+            number=56,
+            title="chore(deps): update postgres docker tag to v18",
+            head_branch="renovate/postgres-18.x",
+            base_branch="staging",
+            ci_status=STATUS_FAIL,
+            merge_state="UNSTABLE",
+            changed_files=[".github/workflows/tests.yml"],
+            updates=[
+                RenovateUpdateItem(
+                    package="postgres",
+                    update_type="major",
+                    from_version="14",
+                    to_version="18",
+                    raw_change="14 -> 18",
+                )
+            ],
+            has_release_notes=False,
+            has_renovate_warning=False,
+            release_notes_excerpt="",
+        )
+        renovate_cfg = RenovateConfigInfo(exists=True, valid_json=True, extends_dev_platform=True)
+
+        with patch("core.maintenance.renovate.is_ollama_enabled", return_value=True), patch(
+            "core.maintenance.renovate.ensure_repo_context_allowed"
+        ), patch("core.maintenance.renovate.chat_json", side_effect=OllamaError("connection refused")), patch(
+            "builtins.print"
+        ):
+            analysis = analyze_renovate_pr("sjvtdm", "/tmp/repo", pr, [], renovate_cfg)
+
+        self.assertEqual(analysis.source, "heuristic")
+        self.assertEqual(analysis.risk_level, RISK_BLOCKED)
+        self.assertTrue(any("CI" in chk for chk in analysis.checks_before_merge))
+
+    def test_inspect_dependency_dashboard_parses_clean_and_pending_states(self) -> None:
+        dashboard_payload = [
+            {
+                "number": 52,
+                "title": "Dependency Dashboard",
+                "state": "OPEN",
+                "body": (
+                    "This repository currently has no open or pending branches.\n"
+                    "<details><summary>github-actions (1)</summary></details>\n"
+                    "<details><summary>pip_requirements (1)</summary></details>\n"
+                    "- [ ] <!-- manual job -->Check this box\n"
+                ),
+            }
+        ]
+        completed = subprocess.CompletedProcess(
+            args=["gh", "issue", "list"],
+            returncode=0,
+            stdout=json.dumps(dashboard_payload),
+            stderr="",
+        )
+        with patch("core.maintenance.renovate.run_command", return_value=completed):
+            info = inspect_dependency_dashboard("/tmp/repo")
+
+        self.assertEqual(info.status, STATUS_PASS)
+        self.assertEqual(info.issue_number, 52)
+        self.assertTrue(info.no_open_or_pending)
+        self.assertEqual(info.open_items, [])
+        self.assertEqual(info.detected_managers, ["github-actions", "pip_requirements"])
 
 
 if __name__ == "__main__":
