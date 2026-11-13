@@ -68,7 +68,8 @@ def checkout_update_base_branch(repo_path: str, base_branch: str) -> None:
 
 
 def resolve_merge_base_branch(path: str) -> tuple[str | None, str]:
-    git_command(path, ["fetch", DEFAULT_REMOTE, "--prune"], silent=True)
+    if not is_dry_run():
+        git_command(path, ["fetch", DEFAULT_REMOTE, "--prune"], silent=True)
     return resolve_repo_base_branch(path, DEFAULT_REMOTE)
 
 

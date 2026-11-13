@@ -18,6 +18,9 @@ def repo_is_clean(repo_path: str) -> bool:
 
 
 def fetch(repo_path: str, repo_name: str) -> bool:
+    if is_dry_run():
+        console.print(f"🧪 [cyan]{repo_name}[/]: would fetch --all --prune from {REMOTE}.")
+        return True
     res = git_command(repo_path, ["fetch", "--all", "--prune"], silent=True)
     if res.returncode != 0:
         console.print(f"❌ [red]{repo_name}[/]: fetch failed:\n{(res.stderr or '').strip()}")

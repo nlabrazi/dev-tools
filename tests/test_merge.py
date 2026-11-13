@@ -2,7 +2,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from core.merge import create_and_merge_pr, get_pr_status, main
+from core.merge import create_and_merge_pr, get_pr_status, main, resolve_merge_base_branch
 
 
 class MergeSelectionTests(unittest.TestCase):
@@ -105,6 +105,18 @@ class MergeDryRunTests(unittest.TestCase):
             create_and_merge_pr("/tmp/repo", "repo")
 
         merge_pr_with_retry.assert_not_called()
+
+    def test_resolve_merge_base_branch_skips_fetch_in_dry_run(self) -> None:
+        with patch("core.merge.is_dry_run", return_value=True), patch(
+            "core.merge.git_command"
+        ) as git_command, patch(
+            "core.merge.resolve_repo_base_branch",
+            return_value=("main", "resolved"),
+        ):
+            branch, reason = resolve_merge_base_branch("/tmp/repo")
+
+        self.assertEqual((branch, reason), ("main", "resolved"))
+        git_command.assert_not_called()
 
     def test_create_and_merge_pr_uses_resolved_base_branch_for_pr_creation(self) -> None:
         create_result = subprocess.CompletedProcess(
