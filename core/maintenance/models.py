@@ -295,6 +295,45 @@ class MigrationPlan:
 
 
 @dataclass(frozen=True)
+class DeploymentChecklistItem:
+    name: str
+    status: str
+    details: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class DeploymentChecklist:
+    repo_name: str
+    generated_at: str
+    ready_to_deploy: bool
+    items: list[DeploymentChecklistItem] = field(default_factory=list)
+    safety_rules: list[str] = field(default_factory=list)
+    rollback_steps: list[str] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class PostDeployVerificationReport:
+    repo_name: str
+    generated_at: str
+    service_status: str = STATUS_UNKNOWN
+    database_status: str = STATUS_UNKNOWN
+    scheduled_jobs_status: str = "PENDING VERIFICATION"
+    sentinel_verified: bool = False
+    overall_status: str = STATUS_PENDING
+    notes: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class AuditReport:
     repo_name: str
     repo_path: str

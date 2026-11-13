@@ -28,7 +28,11 @@ from core.maintenance.models import (
     AuditReport,
 )
 from core.maintenance.planner import generate_migration_plan
-from core.maintenance.production import inspect_production_environment
+from core.maintenance.production import (
+    inspect_production_environment,
+    prepare_deployment_and_rollback,
+    verify_post_deployment,
+)
 from core.maintenance.renovate import (
     inspect_ci_status,
     inspect_dependency_dashboard,
@@ -37,8 +41,11 @@ from core.maintenance.renovate import (
 )
 from core.maintenance.reporter import (
     render_audit_report,
+    render_deployment_checklist,
     render_migration_application_result,
     render_migration_plan,
+    render_post_deploy_verification,
+    render_production_environment_info,
     render_proposed_changes_preview,
     render_renovate_pr_analysis,
     render_risk_assessments,
@@ -49,7 +56,7 @@ from core.maintenance.validator import run_migration_validations
 from utils.console import ask_yes_no, ui_panel, ui_table
 
 console = Console()
-MAINTENANCE_MENU_CHOICES = ("1", "2", "3", "4", "5", "6", "7", "q")
+MAINTENANCE_MENU_CHOICES = ("1", "2", "3", "4", "5", "6", "7", "8", "q")
 
 
 def _compute_overall_status(
@@ -204,7 +211,8 @@ def render_maintenance_menu(repo_name: str) -> None:
     table.add_row("4", "Prepare Migration Changes", "Preview and apply controlled local migration changes on staging.")
     table.add_row("5", "Run & Report Validations", "Run tests and report PASS, FAIL, SKIPPED, PENDING, and UNKNOWN statuses.")
     table.add_row("6", "Git Workflows (Commit / Merge / Promote)", "Commit on staging, merge a Renovate PR into staging, or promote staging → base.")
-    table.add_row("7", "Export Audit Report", "Save the audit and migration report as JSON and Markdown.")
+    table.add_row("7", "Production & Post-Deploy Checks", "Inspect production .venv/backups, deployment checklist, rollback, and Sentinel cron status.")
+    table.add_row("8", "Export Audit Report", "Save the audit and migration report as JSON and Markdown.")
     table.add_row("q", "Back", "Return to the main menu.")
     console.print(table)
 
@@ -357,6 +365,26 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
             continue
 
         if choice == "7":
+            if last_report is None:
+                with console.status(f"[bold cyan]Inspecting repository and production readiness for {repo_name}...[/]", spinner="dots"):
+                    last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=False)
+            prod_info = last_report.production_info or inspect_production_environment(repo_name)
+            render_production_environment_info(prod_info, target_console=console)
+            checklist = prepare_deployment_and_rollback(last_report, prod_info)
+            render_deployment_checklist(checklist, target_console=console)
+            sentinel_ok = ask_yes_no(
+                "Has a real scheduled cron execution been verified via Sentinel after deployment?",
+                default="n",
+            )
+            post_report = verify_post_deployment(
+                repo_name,
+                prod_info,
+                sentinel_cron_verified=sentinel_ok,
+            )
+            render_post_deploy_verification(post_report, target_console=console)
+            continue
+
+        if choice == "8":
             if last_report is None:
                 with console.status(f"[bold cyan]Running audit on {repo_name} before export...[/]", spinner="dots"):
                     last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=True)

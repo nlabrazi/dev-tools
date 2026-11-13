@@ -1,8 +1,21 @@
+from datetime import datetime
 import os
 import re
 from pathlib import Path
 
-from core.maintenance.models import ProductionEnvironmentInfo
+from core.maintenance.models import (
+    RISK_BLOCKED,
+    RISK_LOW,
+    STATUS_FAIL,
+    STATUS_PASS,
+    STATUS_PENDING,
+    STATUS_UNKNOWN,
+    AuditReport,
+    DeploymentChecklist,
+    DeploymentChecklistItem,
+    PostDeployVerificationReport,
+    ProductionEnvironmentInfo,
+)
 from utils.common import run_command
 
 PYVENV_VERSION_RE = re.compile(r"^\s*version(?:_info)?\s*=\s*([0-9]+\.[0-9]+(?:\.[0-9]+)?)", re.MULTILINE)
@@ -226,4 +239,208 @@ def inspect_production_environment(
         access_mode="unconfigured",
         app_path=default_app_path,
         details="Production access not configured (set DEVTOOLS_PRODUCTION_SSH_HOST or DEVTOOLS_PRODUCTION_DEPLOY_ROOT).",
+    )
+
+
+def prepare_deployment_and_rollback(
+    report: AuditReport,
+    prod_info: ProductionEnvironmentInfo | None = None,
+    *,
+    now: datetime | None = None,
+) -> DeploymentChecklist:
+    timestamp = (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+    effective_prod = prod_info or report.production_info or inspect_production_environment(report.repo_name)
+
+    items: list[DeploymentChecklistItem] = []
+    blockers: list[str] = []
+
+    if report.git_state.is_clean:
+        items.append(
+            DeploymentChecklistItem(
+                name="Git Working Tree",
+                status=STATUS_PASS,
+                details=f"Branch '{report.git_state.branch}' is clean.",
+            )
+        )
+    else:
+        msg = (
+            f"Working tree on '{report.git_state.branch}' has uncommitted changes "
+            f"({report.git_state.staged_count} staged, {report.git_state.unstaged_count} unstaged)."
+        )
+        items.append(DeploymentChecklistItem(name="Git Working Tree", status=STATUS_FAIL, details=msg))
+        blockers.append(msg)
+
+    gha = report.ci_summary.github_actions_status
+    jks = report.ci_summary.jenkins_status
+    if gha == STATUS_FAIL or jks == STATUS_FAIL:
+        msg = f"CI failure detected (GitHub Actions: {gha}, Jenkins: {jks})."
+        items.append(DeploymentChecklistItem(name="CI Pipeline Status", status=STATUS_FAIL, details=msg))
+        blockers.append(msg)
+    elif gha == STATUS_PASS and jks in {STATUS_PASS, "N/A"}:
+        items.append(
+            DeploymentChecklistItem(
+                name="CI Pipeline Status",
+                status=STATUS_PASS,
+                details=f"GitHub Actions: {gha}, Jenkins: {jks}.",
+            )
+        )
+    else:
+        items.append(
+            DeploymentChecklistItem(
+                name="CI Pipeline Status",
+                status=STATUS_PENDING,
+                details=f"GitHub Actions: {gha}, Jenkins: {jks} (verify CI is green before production deploy).",
+            )
+        )
+
+    blocked_prs = [
+        pr
+        for pr in report.open_prs
+        if pr.ci_status == STATUS_FAIL or (pr.analysis and pr.analysis.risk_level == RISK_BLOCKED)
+    ]
+    if blocked_prs:
+        nums = ", ".join(f"#{pr.number}" for pr in blocked_prs)
+        msg = f"Blocked or failing Renovate PR(s) open: {nums}."
+        items.append(DeploymentChecklistItem(name="Open Renovate PR Risk", status=STATUS_FAIL, details=msg))
+        blockers.append(msg)
+    elif not report.open_prs or all(pr.analysis and pr.analysis.risk_level == RISK_LOW for pr in report.open_prs):
+        items.append(
+            DeploymentChecklistItem(
+                name="Open Renovate PR Risk",
+                status=STATUS_PASS,
+                details=f"{len(report.open_prs)} open Renovate PR(s), no high-risk blockers.",
+            )
+        )
+    else:
+        items.append(
+            DeploymentChecklistItem(
+                name="Open Renovate PR Risk",
+                status=STATUS_PENDING,
+                details=f"{len(report.open_prs)} open Renovate PR(s) require review before promotion.",
+            )
+        )
+
+    if not effective_prod.configured:
+        items.append(
+            DeploymentChecklistItem(
+                name="Production Environment & Backup Virtualenv",
+                status=STATUS_UNKNOWN,
+                details="Production access not configured; verify backup virtualenv manually on VPS before deploying.",
+            )
+        )
+    elif not effective_prod.reachable:
+        msg = f"Configured production environment ({effective_prod.app_path}) is unreachable."
+        items.append(
+            DeploymentChecklistItem(
+                name="Production Environment & Backup Virtualenv",
+                status=STATUS_FAIL,
+                details=msg,
+            )
+        )
+        blockers.append(msg)
+    elif effective_prod.venv_path and not effective_prod.backup_venvs:
+        items.append(
+            DeploymentChecklistItem(
+                name="Production Environment & Backup Virtualenv",
+                status=STATUS_PENDING,
+                details=f"Create a backup virtualenv in {effective_prod.app_path} before switching .venv symlink.",
+            )
+        )
+    else:
+        backups_label = ", ".join(effective_prod.backup_venvs) if effective_prod.backup_venvs else "N/A"
+        items.append(
+            DeploymentChecklistItem(
+                name="Production Environment & Backup Virtualenv",
+                status=STATUS_PASS,
+                details=f"Reachable at {effective_prod.app_path}; backups: {backups_label}.",
+            )
+        )
+
+    if effective_prod.venv_has_pip is False and effective_prod.deploy_uses_uv_pip is False:
+        msg = "Production deploy.sh uses raw 'pip install' while .venv has no pip binary; use 'uv pip install --python .venv/bin/python'."
+        items.append(DeploymentChecklistItem(name="Deploy Script Compatibility", status=STATUS_FAIL, details=msg))
+        blockers.append(msg)
+    else:
+        items.append(
+            DeploymentChecklistItem(
+                name="Deploy Script Compatibility",
+                status=STATUS_PASS,
+                details="Deployment script is compatible with detected virtualenv setup.",
+            )
+        )
+
+    safety_rules = [
+        "Never deploy automatically without explicit human confirmation.",
+        "Never modify system Debian Python (/usr/bin/python3).",
+        "Never delete backup virtualenvs (.venv-*-backup) without explicit confirmation.",
+        "Never run destructive database migrations or major DB upgrades automatically.",
+    ]
+
+    rollback_steps: list[str] = []
+    if effective_prod.backup_venvs:
+        backup_target = effective_prod.backup_venvs[0]
+        rollback_steps.append(
+            f"1. Restore previous virtualenv symlink: ln -sfn {backup_target} {effective_prod.app_path}/.venv"
+        )
+        rollback_steps.append("2. Restart application service / workers and verify health check.")
+    elif report.migration_plan is not None:
+        rollback_steps.extend(report.migration_plan.rollback_plan.steps)
+    else:
+        rollback_steps.append("1. Revert the merge commit on base branch and re-run deploy.sh.")
+
+    return DeploymentChecklist(
+        repo_name=report.repo_name,
+        generated_at=timestamp,
+        ready_to_deploy=len(blockers) == 0,
+        items=items,
+        safety_rules=safety_rules,
+        rollback_steps=rollback_steps,
+        blockers=blockers,
+    )
+
+
+def verify_post_deployment(
+    repo_name: str,
+    prod_info: ProductionEnvironmentInfo | None = None,
+    *,
+    service_status: str = STATUS_UNKNOWN,
+    database_status: str = STATUS_UNKNOWN,
+    sentinel_cron_verified: bool = False,
+    now: datetime | None = None,
+) -> PostDeployVerificationReport:
+    timestamp = (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
+    notes: list[str] = []
+
+    if prod_info is not None and not prod_info.configured:
+        notes.append("Production access is not configured locally; runtime statuses require manual or Sentinel check.")
+
+    if sentinel_cron_verified:
+        scheduled_status = STATUS_PASS
+        notes.append("Scheduled jobs / cron execution confirmed via Sentinel.")
+    else:
+        scheduled_status = "PENDING VERIFICATION"
+        notes.append(
+            "Scheduled jobs: PENDING VERIFICATION — wait for the next real scheduled cron run and confirm via Sentinel before closing maintenance."
+        )
+
+    if service_status == STATUS_FAIL or database_status == STATUS_FAIL:
+        overall = STATUS_FAIL
+    elif (
+        service_status == STATUS_PASS
+        and database_status in {STATUS_PASS, "N/A"}
+        and sentinel_cron_verified
+    ):
+        overall = "VERIFIED IN PRODUCTION"
+    else:
+        overall = "AWAITING FINAL RUNTIME / CRON CHECK"
+
+    return PostDeployVerificationReport(
+        repo_name=repo_name,
+        generated_at=timestamp,
+        service_status=service_status,
+        database_status=database_status,
+        scheduled_jobs_status=scheduled_status,
+        sentinel_verified=sentinel_cron_verified,
+        overall_status=overall,
+        notes=notes,
     )

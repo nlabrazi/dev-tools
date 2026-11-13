@@ -43,10 +43,13 @@ from core.maintenance import (
     parse_dashboard_pending_update,
     parse_python_test_output,
     parse_renovate_pr_body,
+    prepare_deployment_and_rollback,
     prepare_migration_changes,
     render_audit_report,
+    render_deployment_checklist,
     render_migration_application_result,
     render_migration_plan,
+    render_post_deploy_verification,
     render_production_environment_info,
     render_proposed_changes_preview,
     render_risk_assessments,
@@ -57,6 +60,7 @@ from core.maintenance import (
     save_audit_report,
     summarize_risk_assessments,
     verify_migration_git_preconditions,
+    verify_post_deployment,
 )
 from core.ollama import OllamaError
 from utils.common import set_dry_run
@@ -910,6 +914,72 @@ class ProductionInspectionTests(unittest.TestCase):
             render_production_environment_info(prod_info, target_console=test_console)
             self.assertIn("3.15.2", buffer.getvalue())
             self.assertIn(".venv-313-backup", buffer.getvalue())
+
+
+class DeploymentAndRollbackChecksTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_dry_run(False)
+
+    def test_deployment_checklist_blocks_raw_pip_and_dirty_worktree_and_enforces_sentinel_cron_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir, tempfile.TemporaryDirectory() as prod_dir:
+            root = Path(tmp_dir)
+            (root / "renovate.json").write_text(
+                json.dumps({"extends": ["github>nlabrazi/dev-platform//configs/renovate/base"]}),
+                encoding="utf-8",
+            )
+            app_dir = Path(prod_dir) / "sjvtdm"
+            venv_target = app_dir / ".venv-315"
+            (venv_target / "bin").mkdir(parents=True)
+            (venv_target / "bin" / "python").write_text("", encoding="utf-8")
+            os.symlink(".venv-315", app_dir / ".venv")
+            (app_dir / ".venv-313-backup").mkdir(parents=True)
+            (app_dir / "deploy.sh").write_text("#!/bin/bash\npip install -r requirements.txt\n", encoding="utf-8")
+
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch(
+                "core.maintenance.detector.git_output",
+                side_effect=["staging", " M README.md\n", "0\t0"],
+            ), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", return_value=empty_gh):
+                report = audit_repository(tmp_dir, "sjvtdm", include_ollama_analysis=False)
+
+            prod_info = inspect_production_environment("sjvtdm", deploy_root=prod_dir)
+            checklist = prepare_deployment_and_rollback(report, prod_info)
+            self.assertFalse(checklist.ready_to_deploy)
+            self.assertGreaterEqual(len(checklist.blockers), 2)
+            self.assertTrue(any(".venv-313-backup" in step for step in checklist.rollback_steps))
+            self.assertTrue(any("Debian Python" in rule for rule in checklist.safety_rules))
+
+            pending_post = verify_post_deployment(
+                "sjvtdm",
+                prod_info,
+                service_status=STATUS_PASS,
+                database_status=STATUS_PASS,
+                sentinel_cron_verified=False,
+            )
+            self.assertEqual(pending_post.scheduled_jobs_status, "PENDING VERIFICATION")
+            self.assertEqual(pending_post.overall_status, "AWAITING FINAL RUNTIME / CRON CHECK")
+            self.assertTrue(any("Scheduled jobs: PENDING VERIFICATION" in n for n in pending_post.notes))
+
+            verified_post = verify_post_deployment(
+                "sjvtdm",
+                prod_info,
+                service_status=STATUS_PASS,
+                database_status=STATUS_PASS,
+                sentinel_cron_verified=True,
+            )
+            self.assertEqual(verified_post.scheduled_jobs_status, STATUS_PASS)
+            self.assertEqual(verified_post.overall_status, "VERIFIED IN PRODUCTION")
+
+            buffer = io.StringIO()
+            test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+            render_deployment_checklist(checklist, target_console=test_console)
+            render_post_deploy_verification(pending_post, target_console=test_console)
+            rendered = buffer.getvalue()
+            self.assertIn("BLOCKED", rendered)
+            self.assertIn("PENDING VERIFICATION", rendered)
 
 
 if __name__ == "__main__":

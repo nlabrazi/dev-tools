@@ -15,8 +15,10 @@ from core.maintenance.models import (
     STATUS_PASS,
     STATUS_PENDING,
     AuditReport,
+    DeploymentChecklist,
     MigrationApplicationResult,
     MigrationPlan,
+    PostDeployVerificationReport,
     ProductionEnvironmentInfo,
     ProposedFileChange,
     RenovatePRInfo,
@@ -530,6 +532,69 @@ def render_production_environment_info(
             lines.append(f"- {issue}")
 
     out.print(ui_panel("\n".join(lines), title="Production Environment Inspection", tone=tone))
+
+
+def render_deployment_checklist(
+    checklist: DeploymentChecklist,
+    *,
+    target_console: Console | None = None,
+) -> None:
+    out = target_console or console
+    table = ui_table(
+        title=f"Production Deployment & Rollback Checklist · {checklist.repo_name}",
+        caption="No automatic deployment, DB migration, or backup deletion is ever triggered without human confirmation.",
+        show_lines=True,
+    )
+    table.add_column("Precondition", style="bold white")
+    table.add_column("Status", justify="center", no_wrap=True)
+    table.add_column("Details", style="white")
+    for item in checklist.items:
+        table.add_row(item.name, _status_badge(item.status), item.details)
+    out.print(table)
+
+    ready_label = "[bold green]READY FOR MANUAL DEPLOY[/]" if checklist.ready_to_deploy else "[bold red]BLOCKED — RESOLVE ISSUES FIRST[/]"
+    lines = [f"[bold white]Deployment Readiness:[/] {ready_label}"]
+    if checklist.blockers:
+        lines.append("")
+        lines.append("[bold red]Blockers:[/]")
+        for blk in checklist.blockers:
+            lines.append(f"- {blk}")
+
+    lines.append("")
+    lines.append("[bold cyan]Rollback Procedure:[/]")
+    for step in checklist.rollback_steps:
+        lines.append(f"- {step}")
+
+    lines.append("")
+    lines.append("[bold yellow]Mandatory Safety Rules:[/]")
+    for rule in checklist.safety_rules:
+        lines.append(f"- {rule}")
+
+    tone = "success" if checklist.ready_to_deploy else "danger"
+    out.print(ui_panel("\n".join(lines), title="Deployment & Rollback Summary", tone=tone))
+
+
+def render_post_deploy_verification(
+    report: PostDeployVerificationReport,
+    *,
+    target_console: Console | None = None,
+) -> None:
+    out = target_console or console
+    lines = [
+        f"[bold white]Repository:[/] [cyan]{report.repo_name}[/]  [dim]({report.generated_at})[/]",
+        f"[bold white]Service status:[/] {_status_badge(report.service_status)}",
+        f"[bold white]Database connectivity:[/] {_status_badge(report.database_status)}",
+        f"[bold white]Scheduled jobs (Cron / Sentinel):[/] [bold yellow]{report.scheduled_jobs_status}[/]",
+        f"[bold white]Overall Post-Deploy Status:[/] [bold cyan]{report.overall_status}[/]",
+    ]
+    if report.notes:
+        lines.append("")
+        lines.append("[bold yellow]Verification Notes:[/]")
+        for note in report.notes:
+            lines.append(f"- {note}")
+
+    tone = "success" if report.overall_status == "VERIFIED IN PRODUCTION" else ("danger" if report.overall_status == STATUS_FAIL else "warning")
+    out.print(ui_panel("\n".join(lines), title="Post-Deployment & Sentinel Verification", tone=tone))
 
 
 
