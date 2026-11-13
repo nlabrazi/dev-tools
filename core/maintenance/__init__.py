@@ -18,6 +18,7 @@ from core.maintenance.git_ops import (
     merge_renovate_pr_to_staging,
     run_maintenance_auto_commit,
     run_maintenance_promote_to_base,
+    run_renovate_onboarding_workflow,
 )
 from core.maintenance.journal import (
     get_resume_recommendation,
@@ -207,6 +208,7 @@ __all__ = [
     "run_maintenance_auto_commit",
     "run_maintenance_promote_to_base",
     "run_migration_validations",
+    "run_renovate_onboarding_workflow",
     "save_audit_report",
     "save_maintenance_journal",
     "summarize_risk_assessments",

@@ -57,27 +57,55 @@ def verify_migration_git_preconditions(
     return len(issues) == 0, issues
 
 
+def _detect_private_npm_registry(repo_root: Path, report: AuditReport) -> bool:
+    if report.renovate_config.has_private_registry:
+        return True
+    for candidate in (repo_root / ".npmrc", repo_root / "ui" / ".npmrc", repo_root / "frontend" / ".npmrc"):
+        if candidate.is_file():
+            try:
+                text = candidate.read_text(encoding="utf-8", errors="ignore")
+                if "npm.pkg.github.com" in text or "@nlabrazi:registry" in text:
+                    return True
+            except OSError:
+                pass
+    for pkg_candidate in (repo_root / "package.json", repo_root / "ui" / "package.json", repo_root / "frontend" / "package.json"):
+        if pkg_candidate.is_file():
+            try:
+                text = pkg_candidate.read_text(encoding="utf-8", errors="ignore")
+                if "@nlabrazi/" in text:
+                    return True
+            except OSError:
+                pass
+    return False
+
+
 def _propose_renovate_config_change(repo_root: Path, report: AuditReport) -> ProposedFileChange | None:
     rc = report.renovate_config
     if (repo_root / "configs" / "renovate" / "base.json").is_file():
         return None
 
+    needs_private_npmrc = _detect_private_npm_registry(repo_root, report)
     target_path = repo_root / rc.path
     if not rc.exists:
-        payload = {
+        payload: dict[str, object] = {
             "$schema": "https://docs.renovatebot.com/renovate-schema.json",
             "extends": [DEV_PLATFORM_PRESET],
         }
+        if needs_private_npmrc:
+            payload["npmrc"] = "@nlabrazi:registry=https://npm.pkg.github.com/"
         new_text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        reason = "Initialize Renovate configuration inheriting central Dev Platform preset"
+        if needs_private_npmrc:
+            reason += " (with @nlabrazi GitHub Packages registry)"
         return ProposedFileChange(
             path=rc.path,
             action="create",
-            reason="Initialize Renovate configuration inheriting central Dev Platform preset.",
+            reason=reason + ".",
             preview_diff=_unified_preview(rc.path, "", new_text),
             new_content=new_text,
         )
 
-    if rc.valid_json and not rc.extends_dev_platform and target_path.is_file():
+    if rc.valid_json and target_path.is_file():
         try:
             old_text = target_path.read_text(encoding="utf-8")
             data = json.loads(old_text)
@@ -86,10 +114,18 @@ def _propose_renovate_config_change(repo_root: Path, report: AuditReport) -> Pro
         if not isinstance(data, dict):
             return None
 
+        changed = False
         extends = list(data.get("extends")) if isinstance(data.get("extends"), list) else []
         if DEV_PLATFORM_PRESET not in extends:
             extends = [DEV_PLATFORM_PRESET] + [e for e in extends if e != "config:recommended"]
             data["extends"] = extends
+            changed = True
+
+        if needs_private_npmrc and "npmrc" not in data:
+            data["npmrc"] = "@nlabrazi:registry=https://npm.pkg.github.com/"
+            changed = True
+
+        if changed:
             new_text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
             if new_text != old_text:
                 return ProposedFileChange(
