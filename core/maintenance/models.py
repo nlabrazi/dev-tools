@@ -219,6 +219,34 @@ class MigrationApplicationResult:
 
 
 @dataclass(frozen=True)
+class ValidationCheckResult:
+    name: str
+    category: str
+    status: str
+    passed_count: int = 0
+    failed_count: int = 0
+    skipped_count: int = 0
+    command: str = ""
+    details: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ValidationReport:
+    repo_name: str
+    generated_at: str
+    checks: list[ValidationCheckResult] = field(default_factory=list)
+    counts_by_status: dict[str, int] = field(default_factory=dict)
+    overall_status: str = STATUS_UNKNOWN
+    reservations: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class RollbackPlan:
     strategy: str
     backup_target: str

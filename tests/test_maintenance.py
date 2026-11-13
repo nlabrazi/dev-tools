@@ -19,6 +19,7 @@ from core.maintenance import (
     RISK_REVIEW,
     STATUS_FAIL,
     STATUS_PASS,
+    STATUS_SKIPPED,
     STATUS_UNKNOWN,
     RenovateConfigInfo,
     RenovatePRInfo,
@@ -38,6 +39,7 @@ from core.maintenance import (
     inspect_git_state,
     inspect_renovate_config,
     parse_dashboard_pending_update,
+    parse_python_test_output,
     parse_renovate_pr_body,
     prepare_migration_changes,
     render_audit_report,
@@ -45,6 +47,8 @@ from core.maintenance import (
     render_migration_plan,
     render_proposed_changes_preview,
     render_risk_assessments,
+    render_validation_report,
+    run_migration_validations,
     save_audit_report,
     summarize_risk_assessments,
     verify_migration_git_preconditions,
@@ -662,6 +666,68 @@ class ControlledMigrationPreparationTests(unittest.TestCase):
             render_proposed_changes_preview(proposals, target_console=test_console)
             render_migration_application_result(applied, target_console=test_console)
             self.assertIn("Proposed Change #1", buffer.getvalue())
+
+
+class MigrationValidationTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_dry_run(False)
+
+    def test_skipped_tests_never_produce_false_pass_and_counts_all_statuses(self) -> None:
+        status, passed, failed, skipped, summary = parse_python_test_output(
+            "Ran 14 tests in 0.120s\n\nOK (skipped=2)",
+            0,
+        )
+        self.assertEqual(status, STATUS_SKIPPED)
+        self.assertEqual(passed, 12)
+        self.assertEqual(failed, 0)
+        self.assertEqual(skipped, 2)
+        self.assertIn("2 skipped", summary)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "tests").mkdir()
+            (root / "renovate.json").write_text(
+                json.dumps({"extends": ["github>nlabrazi/dev-platform//configs/renovate/base"]}),
+                encoding="utf-8",
+            )
+            (root / "Jenkinsfile").write_text(
+                "pipeline { agent { docker { image 'python:3.15.2' } } }\n",
+                encoding="utf-8",
+            )
+            wf_dir = root / ".github" / "workflows"
+            wf_dir.mkdir(parents=True)
+            (wf_dir / "tests.yml").write_text(
+                'steps:\n  - with:\n      python-version: "3.15.2"\n',
+                encoding="utf-8",
+            )
+
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch("core.maintenance.detector.git_output", return_value="staging"), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", return_value=empty_gh):
+                report = audit_repository(tmp_dir, "sjvtdm", include_ollama_analysis=False)
+
+            test_proc = subprocess.CompletedProcess(
+                args=["python3", "-m", "unittest"],
+                returncode=0,
+                stdout="",
+                stderr="Ran 10 tests in 0.05s\n\nOK (skipped=1)\n",
+            )
+            with patch("core.maintenance.validator.run_command", return_value=test_proc):
+                val_report = run_migration_validations(report, execute_local_tests=True)
+
+            self.assertIn("SKIPPED", val_report.overall_status)
+            self.assertGreaterEqual(val_report.counts_by_status[STATUS_SKIPPED], 1)
+            self.assertGreaterEqual(val_report.counts_by_status[STATUS_UNKNOWN], 1)
+            self.assertTrue(any("SKIPPED" in r for r in val_report.reservations))
+
+            buffer = io.StringIO()
+            test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+            render_validation_report(val_report, target_console=test_console)
+            rendered = buffer.getvalue()
+            self.assertIn("Validation Report", rendered)
+            self.assertIn("SKIPPED", rendered)
 
 
 if __name__ == "__main__":

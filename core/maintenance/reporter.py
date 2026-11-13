@@ -20,6 +20,7 @@ from core.maintenance.models import (
     ProposedFileChange,
     RenovatePRInfo,
     UpdateRiskAssessment,
+    ValidationReport,
 )
 from utils.common import is_dry_run
 from utils.console import ui_panel, ui_table
@@ -443,6 +444,51 @@ def render_migration_application_result(
     for msg in result.messages:
         lines.append(f"- {msg}")
     out.print(ui_panel("\n".join(lines), title="Migration Changes Result", tone=tone, compact=True))
+
+
+def render_validation_report(
+    report: ValidationReport,
+    *,
+    target_console: Console | None = None,
+) -> None:
+    out = target_console or console
+    table = ui_table(
+        title=f"Validation Report · {report.repo_name}",
+        caption="PASS, FAIL, SKIPPED, PENDING and UNKNOWN are reported separately. Skipped tests never count as a full pass.",
+        show_lines=True,
+    )
+    table.add_column("Check", style="bold white")
+    table.add_column("Category", justify="center", style="cyan", no_wrap=True)
+    table.add_column("Status", justify="center", no_wrap=True)
+    table.add_column("Details", style="white")
+
+    for chk in report.checks:
+        detail_text = chk.details
+        if chk.command:
+            detail_text += f"\n[dim]Command: {chk.command}[/]"
+        table.add_row(chk.name, chk.category, _status_badge(chk.status), detail_text)
+    out.print(table)
+
+    c = report.counts_by_status
+    summary_lines = [
+        f"[bold white]Overall Validation Status:[/] {_status_badge(report.overall_status)}",
+        (
+            f"[bold green]PASS:[/] {c.get('PASS', 0)}  |  "
+            f"[bold red]FAIL:[/] {c.get('FAIL', 0)}  |  "
+            f"[bold yellow]SKIPPED:[/] {c.get('SKIPPED', 0)}  |  "
+            f"[bold yellow]PENDING:[/] {c.get('PENDING', 0)}  |  "
+            f"[dim]UNKNOWN:[/] {c.get('UNKNOWN', 0)}"
+        ),
+    ]
+    if report.reservations:
+        summary_lines.append("")
+        summary_lines.append("[bold yellow]Validation Reservations:[/]")
+        for res in report.reservations:
+            summary_lines.append(f"- {res}")
+
+    tone = "success" if report.overall_status == STATUS_PASS else ("danger" if report.overall_status == STATUS_FAIL else "warning")
+    out.print(ui_panel("\n".join(summary_lines), title="Validation Summary", tone=tone))
+
 
 
 

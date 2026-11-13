@@ -51,6 +51,8 @@ from core.maintenance.models import (
     RollbackPlan,
     StackComponent,
     UpdateRiskAssessment,
+    ValidationCheckResult,
+    ValidationReport,
 )
 from core.maintenance.planner import generate_migration_plan
 from core.maintenance.renovate import (
@@ -72,7 +74,12 @@ from core.maintenance.reporter import (
     render_proposed_changes_preview,
     render_renovate_pr_analysis,
     render_risk_assessments,
+    render_validation_report,
     save_audit_report,
+)
+from core.maintenance.validator import (
+    parse_python_test_output,
+    run_migration_validations,
 )
 from core.maintenance.workflow import (
     ask_maintenance_action,
@@ -113,6 +120,8 @@ __all__ = [
     "STATUS_UNKNOWN",
     "StackComponent",
     "UpdateRiskAssessment",
+    "ValidationCheckResult",
+    "ValidationReport",
     "analyze_renovate_pr",
     "apply_migration_changes",
     "ask_maintenance_action",
@@ -135,6 +144,7 @@ __all__ = [
     "inspect_renovate_config",
     "inspect_single_renovate_pr",
     "parse_dashboard_pending_update",
+    "parse_python_test_output",
     "parse_renovate_pr_body",
     "prepare_migration_changes",
     "render_audit_report",
@@ -144,7 +154,9 @@ __all__ = [
     "render_proposed_changes_preview",
     "render_renovate_pr_analysis",
     "render_risk_assessments",
+    "render_validation_report",
     "run_dependency_maintenance_for_repo",
+    "run_migration_validations",
     "save_audit_report",
     "summarize_risk_assessments",
     "verify_migration_git_preconditions",

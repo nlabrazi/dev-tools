@@ -36,12 +36,14 @@ from core.maintenance.reporter import (
     render_proposed_changes_preview,
     render_renovate_pr_analysis,
     render_risk_assessments,
+    render_validation_report,
     save_audit_report,
 )
+from core.maintenance.validator import run_migration_validations
 from utils.console import ask_yes_no, ui_panel, ui_table
 
 console = Console()
-MAINTENANCE_MENU_CHOICES = ("1", "2", "3", "4", "5", "q")
+MAINTENANCE_MENU_CHOICES = ("1", "2", "3", "4", "5", "6", "q")
 
 
 def _compute_overall_status(
@@ -182,7 +184,8 @@ def render_maintenance_menu(repo_name: str) -> None:
     table.add_row("2", "Inspect Specific PR", "Analyze any PR number (open or merged) with Ollama for breaking changes.")
     table.add_row("3", "Analyze Risks & Migration Plan", "Classify update risks, files to review, validation steps, and rollback plan.")
     table.add_row("4", "Prepare Migration Changes", "Preview and apply controlled local migration changes on staging.")
-    table.add_row("5", "Export Audit Report", "Save the audit and migration report as JSON and Markdown.")
+    table.add_row("5", "Run & Report Validations", "Run tests and report PASS, FAIL, SKIPPED, PENDING, and UNKNOWN statuses.")
+    table.add_row("6", "Export Audit Report", "Save the audit and migration report as JSON and Markdown.")
     table.add_row("q", "Back", "Return to the main menu.")
     console.print(table)
 
@@ -291,6 +294,16 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
             continue
 
         if choice == "5":
+            if last_report is None:
+                with console.status(f"[bold cyan]Running audit on {repo_name} before validations...[/]", spinner="dots"):
+                    last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=False)
+            run_tests = ask_yes_no("Execute local unit/integration tests now?", default="y")
+            with console.status(f"[bold cyan]Running migration validations on {repo_name}...[/]", spinner="dots"):
+                val_report = run_migration_validations(last_report, execute_local_tests=run_tests)
+            render_validation_report(val_report, target_console=console)
+            continue
+
+        if choice == "6":
             if last_report is None:
                 with console.status(f"[bold cyan]Running audit on {repo_name} before export...[/]", spinner="dots"):
                     last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=True)
