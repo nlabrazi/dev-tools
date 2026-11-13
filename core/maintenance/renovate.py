@@ -1,5 +1,7 @@
 import json
 import re
+from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path
 
 from rich.console import Console
@@ -580,6 +582,7 @@ def analyze_renovate_pr(
     renovate_config: RenovateConfigInfo,
     *,
     pr_diff: str = "",
+    show_spinner: bool = True,
 ) -> RenovatePRAnalysis:
     fallback = build_fallback_pr_analysis(pr, env_matrix, renovate_config)
     if not is_ollama_enabled():
@@ -628,7 +631,12 @@ def analyze_renovate_pr(
             {"role": "user", "content": user_prompt},
         ]
 
-        with console.status(f"[bold cyan]🤖 Analyzing Renovate PR #{pr.number} with Ollama...[/]", spinner="dots"):
+        status_ctx_1 = (
+            console.status(f"[bold cyan]🤖 Analyzing Renovate PR #{pr.number} with Ollama...[/]", spinner="dots")
+            if show_spinner
+            else nullcontext()
+        )
+        with status_ctx_1:
             raw = chat_json(messages, temperature=0.2, json_mode=True)
         debug_log_output(f"Renovate PR #{pr.number} analysis (attempt 1)", raw)
 
@@ -642,7 +650,12 @@ def analyze_renovate_pr(
         if parsed:
             return parsed
 
-        with console.status(f"[bold cyan]🤖 Retrying Renovate PR #{pr.number} analysis...[/]", spinner="dots"):
+        status_ctx_2 = (
+            console.status(f"[bold cyan]🤖 Retrying Renovate PR #{pr.number} analysis...[/]", spinner="dots")
+            if show_spinner
+            else nullcontext()
+        )
+        with status_ctx_2:
             raw_retry = chat_json(messages, temperature=0.0, json_mode=True)
         debug_log_output(f"Renovate PR #{pr.number} analysis (attempt 2)", raw_retry)
 
@@ -701,6 +714,7 @@ def _build_pr_info_from_gh_item(
     renovate_config: RenovateConfigInfo,
     include_ollama_analysis: bool = True,
     fetch_diff_for_analysis: bool = True,
+    show_spinner: bool = True,
 ) -> RenovatePRInfo:
     number = int(item.get("number") or 0)
     title = str(item.get("title") or "").strip()
@@ -752,6 +766,7 @@ def _build_pr_info_from_gh_item(
             env_matrix,
             renovate_config,
             pr_diff=pr_diff,
+            show_spinner=show_spinner,
         )
     else:
         analysis = build_fallback_pr_analysis(pr_info, env_matrix, renovate_config)
@@ -783,6 +798,7 @@ def inspect_open_renovate_prs(
     renovate_config: RenovateConfigInfo,
     *,
     include_ollama_analysis: bool = True,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> tuple[list[RenovatePRInfo], list[str]]:
     res = run_command(
         [
@@ -812,10 +828,12 @@ def inspect_open_renovate_prs(
 
     prs: list[RenovatePRInfo] = []
     warnings: list[str] = []
+    dep_items = [item for item in items if isinstance(item, dict) and _is_dependency_pr(item)]
 
-    for item in items:
-        if not isinstance(item, dict) or not _is_dependency_pr(item):
-            continue
+    for idx, item in enumerate(dep_items, start=1):
+        pr_num = item.get("number", "?")
+        if progress_callback is not None:
+            progress_callback(f"Analyse IA Ollama PR #{pr_num} ({idx}/{len(dep_items)})...")
         pr_info = _build_pr_info_from_gh_item(
             item,
             repo_name=repo_name,
@@ -823,6 +841,7 @@ def inspect_open_renovate_prs(
             env_matrix=env_matrix,
             renovate_config=renovate_config,
             include_ollama_analysis=include_ollama_analysis,
+            show_spinner=progress_callback is None,
         )
         prs.append(pr_info)
         if pr_info.is_onboarding and renovate_config.exists:

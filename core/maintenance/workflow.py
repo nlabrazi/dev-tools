@@ -1,6 +1,15 @@
+from collections.abc import Callable
 from datetime import datetime
 
 from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.prompt import Prompt
 
 from core.maintenance.analyzer import classify_repository_update_risks
@@ -84,15 +93,21 @@ def audit_repository(
     *,
     include_ollama_analysis: bool = True,
     now: datetime | None = None,
+    progress_callback: Callable[[int, str], None] | None = None,
 ) -> AuditReport:
     timestamp = (now or datetime.now()).strftime("%Y-%m-%d %H:%M:%S")
 
+    if progress_callback is not None:
+        progress_callback(1, f"[{repo_name}] 1/5 Inspection Git & détection de la stack...")
     git_state = inspect_git_state(repo_path)
     stacks, deployment_files, detector_reservations = detect_project_stacks(
         repo_path,
         repo_name,
         git_state=git_state,
     )
+
+    if progress_callback is not None:
+        progress_callback(2, f"[{repo_name}] 2/5 Matrice des versions (local / CI / prod)...")
     declared_versions = collect_declared_versions(repo_path)
     prod_info = inspect_production_environment(repo_name)
     prod_overrides = (
@@ -105,15 +120,30 @@ def audit_repository(
         declared_versions,
         production_overrides=prod_overrides,
     )
+
+    if progress_callback is not None:
+        progress_callback(3, f"[{repo_name}] 3/5 Configuration Renovate & Dependency Dashboard...")
     renovate_config = inspect_renovate_config(repo_path)
     dashboard = inspect_dependency_dashboard(repo_path)
+
+    if progress_callback is not None:
+        progress_callback(4, f"[{repo_name}] 4/5 Récupération & analyse IA des PRs Renovate...")
+    pr_progress_cb = (
+        (lambda msg: progress_callback(4, f"[{repo_name}] 4/5 {msg}"))
+        if progress_callback is not None
+        else None
+    )
     open_prs, pr_warnings = inspect_open_renovate_prs(
         repo_path,
         repo_name,
         env_matrix,
         renovate_config,
         include_ollama_analysis=include_ollama_analysis,
+        progress_callback=pr_progress_cb,
     )
+
+    if progress_callback is not None:
+        progress_callback(5, f"[{repo_name}] 5/5 Vérification CI, calcul des risques & plan...")
     ci_summary = inspect_ci_status(repo_path)
 
     reservations: list[str] = []
@@ -231,6 +261,40 @@ def ask_maintenance_action() -> str:
     ).lower()
 
 
+def _audit_with_progress(
+    repo_path: str,
+    repo_name: str,
+    *,
+    include_ollama_analysis: bool = True,
+) -> AuditReport:
+    console.print()
+    with Progress(
+        SpinnerColumn(style="bold cyan"),
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(bar_width=28),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        task_id = progress.add_task(
+            f"[{repo_name}] Initialisation de l'analyse...",
+            total=5,
+        )
+
+        def _on_progress(step: int, message: str) -> None:
+            progress.update(task_id, completed=max(0, step - 1), description=message)
+
+        report = audit_repository(
+            repo_path,
+            repo_name,
+            include_ollama_analysis=include_ollama_analysis,
+            progress_callback=_on_progress,
+        )
+        progress.update(task_id, completed=5, description=f"[{repo_name}] Analyse terminée.")
+    return report
+
+
 def run_guided_pr_bump_workflow(
     repo_path: str,
     repo_name: str,
@@ -240,6 +304,7 @@ def run_guided_pr_bump_workflow(
 ) -> str:
     out = target_console or console
     if not report.open_prs:
+        out.print()
         out.print(
             ui_panel(
                 "Aucune Pull Request Renovate ouverte sur ce dépôt actuellement.",
@@ -252,6 +317,7 @@ def run_guided_pr_bump_workflow(
 
     merged_or_simulated = 0
     for pr in report.open_prs:
+        out.print()
         render_renovate_pr_analysis(pr, target_console=out)
         merge_status = merge_renovate_pr_to_staging(
             repo_path,
@@ -263,6 +329,7 @@ def run_guided_pr_bump_workflow(
             merged_or_simulated += 1
 
     if merged_or_simulated > 0:
+        out.print()
         if ask_yes_no("Exécuter les validations et tests locaux sur staging maintenant ?", default="y"):
             val_report = run_migration_validations(report, execute_local_tests=True)
             render_validation_report(val_report, target_console=out)
@@ -277,8 +344,7 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
     if existing_journal is not None and not existing_journal.is_complete:
         render_maintenance_journal(existing_journal, target_console=console)
 
-    with console.status(f"[bold cyan]Analyse de l'état de {repo_name} et des PRs Renovate...[/]", spinner="dots"):
-        last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=True)
+    last_report = _audit_with_progress(repo_path, repo_name, include_ollama_analysis=True)
     render_project_dashboard(last_report, target_console=console)
     record_maintenance_step(
         repo_path,
@@ -296,8 +362,7 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
             break
 
         if choice == "r":
-            with console.status(f"[bold cyan]Rafraîchissement du dashboard pour {repo_name}...[/]", spinner="dots"):
-                last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=True)
+            last_report = _audit_with_progress(repo_path, repo_name, include_ollama_analysis=True)
             render_project_dashboard(last_report, target_console=console)
             continue
 
