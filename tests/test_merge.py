@@ -96,6 +96,9 @@ class MergeDryRunTests(unittest.TestCase):
             "core.merge.existing_pr_number",
             return_value="42",
         ), patch(
+            "core.merge.ask_yes_no",
+            return_value=True,
+        ) as ask_yes_no, patch(
             "core.merge.is_dry_run",
             return_value=True,
         ), patch(
@@ -104,6 +107,41 @@ class MergeDryRunTests(unittest.TestCase):
         ), patch("core.merge.merge_pr_with_retry") as merge_pr_with_retry, patch("core.merge.print"):
             create_and_merge_pr("/tmp/repo", "repo")
 
+        ask_yes_no.assert_called_once_with(
+            "🚀 Do you want to enable auto-merge for existing PR #42?",
+            default="n",
+        )
+        merge_pr_with_retry.assert_not_called()
+
+    def test_create_and_merge_pr_existing_pr_requires_confirmation_before_merge(self) -> None:
+        with patch("core.merge.ensure_clean_worktree"), patch(
+            "core.merge.resolve_merge_base_branch",
+            return_value=("main", "resolved from origin/HEAD"),
+        ), patch(
+            "core.merge.get_current_branch",
+            return_value="staging",
+        ), patch(
+            "core.merge.get_commit_summary",
+            return_value="- feat(api): ship feature",
+        ), patch(
+            "core.merge.generate_pr_text",
+            return_value=("Test PR", "Body"),
+        ), patch(
+            "core.merge.existing_pr_number",
+            return_value="42",
+        ), patch(
+            "core.merge.ask_yes_no",
+            return_value=False,
+        ) as ask_yes_no, patch(
+            "core.merge.is_dry_run",
+            return_value=False,
+        ), patch("core.merge.merge_pr_with_retry") as merge_pr_with_retry, patch("core.merge.print"):
+            create_and_merge_pr("/tmp/repo", "repo")
+
+        ask_yes_no.assert_called_once_with(
+            "🚀 Do you want to enable auto-merge for existing PR #42?",
+            default="n",
+        )
         merge_pr_with_retry.assert_not_called()
 
     def test_resolve_merge_base_branch_skips_fetch_in_dry_run(self) -> None:

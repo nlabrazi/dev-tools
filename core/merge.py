@@ -287,6 +287,9 @@ def create_and_merge_pr(path: str, repo_name: str, base_branch: str | None = Non
 
     if pr_number:
         print(f"🔗 Existing Pull Request detected: #{pr_number}")
+        if not ask_yes_no(f"🚀 Do you want to enable auto-merge for existing PR #{pr_number}?", default="n"):
+            print("❌ Skipped.\n")
+            return
         if is_dry_run():
             print(f"🧪 Dry-run: would enable auto-merge for PR #{pr_number} in {repo_name}.")
             return
