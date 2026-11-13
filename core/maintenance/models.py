@@ -185,3 +185,24 @@ class AuditReport:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class UpdateRiskAssessment:
+    subject: str
+    category: str
+    current_version: str
+    proposed_version: str
+    target_version: str
+    update_type: str
+    risk_level: str
+    breaking_change: bool
+    recommendation: str
+    affected_files: list[str] = field(default_factory=list)
+    sources: list[str] = field(default_factory=list)
+    uncertainties: list[str] = field(default_factory=list)
+    pr_number: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+

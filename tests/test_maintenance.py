@@ -15,6 +15,8 @@ from core.maintenance import (
     DRIFT_PROBLEMATIC,
     RISK_BLOCKED,
     RISK_BREAKING,
+    RISK_LOW,
+    RISK_REVIEW,
     STATUS_FAIL,
     STATUS_PASS,
     STATUS_UNKNOWN,
@@ -24,16 +26,20 @@ from core.maintenance import (
     analyze_renovate_pr,
     audit_repository,
     build_environment_matrix,
+    classify_repository_update_risks,
     collect_declared_versions,
     detect_project_stacks,
+    extract_release_notes_signals,
     format_report_json,
     format_report_markdown,
     inspect_dependency_dashboard,
     inspect_git_state,
     inspect_renovate_config,
+    parse_dashboard_pending_update,
     parse_renovate_pr_body,
     render_audit_report,
     save_audit_report,
+    summarize_risk_assessments,
 )
 from core.ollama import OllamaError
 from utils.common import set_dry_run
@@ -414,6 +420,90 @@ class AuditAndExportDryRunTests(unittest.TestCase):
             rendered = buffer.getvalue()
             self.assertIn("Environment Version Matrix", rendered)
             self.assertIn("Final Maintenance Summary", rendered)
+
+
+class UpdateRiskClassificationTests(unittest.TestCase):
+    def test_extracts_release_notes_signals_and_parses_dashboard_pending_items(self) -> None:
+        signals_empty = extract_release_notes_signals("")
+        self.assertFalse(signals_empty["has_breaking_marker"])
+        self.assertTrue(signals_empty["uncertainties"])
+
+        notes = (
+            "### Release Notes\n"
+            "#### Breaking changes ⚠️\n"
+            "- Requires Node.js >= 20.0.0\n"
+            "- Deprecated oldConfig option\n"
+        )
+        signals = extract_release_notes_signals(notes)
+        self.assertTrue(signals["has_breaking_marker"])
+        self.assertTrue(any("Node.js" in c for c in signals["runtime_constraints"]))
+        self.assertTrue(any("Deprecated" in d for d in signals["deprecation_lines"]))
+
+        pkg, from_v, to_v, u_type = parse_dashboard_pending_update(
+            "chore(deps): update dependency @playwright/test from v1.63.0 to v1.65.0"
+        )
+        self.assertEqual(pkg, "@playwright/test")
+        self.assertEqual(from_v, "1.63.0")
+        self.assertEqual(to_v, "1.65.0")
+        self.assertEqual(u_type, "minor")
+
+    def test_classifies_risks_with_sources_uncertainties_and_accepted_postgres_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "requirements.txt").write_text("feedparser\n", encoding="utf-8")
+            (root / "Jenkinsfile").write_text(
+                "pipeline { agent { docker { image 'python:3.11' } } }\n",
+                encoding="utf-8",
+            )
+            wf_dir = root / ".github" / "workflows"
+            wf_dir.mkdir(parents=True)
+            (wf_dir / "tests.yml").write_text(
+                'services:\n  postgres:\n    image: postgres:18\nsteps:\n  - with:\n      python-version: "3.15.2"\n',
+                encoding="utf-8",
+            )
+            (root / "docker-compose.yml").write_text(
+                "services:\n  db:\n    image: postgres:16\n",
+                encoding="utf-8",
+            )
+            venv_target = root / ".venv-315"
+            (venv_target / "bin").mkdir(parents=True)
+            (venv_target / "bin" / "python").write_text("", encoding="utf-8")
+            os.symlink(".venv-315", root / ".venv")
+            (root / "deploy.sh").write_text("#!/bin/bash\npip install -r requirements.txt\n", encoding="utf-8")
+
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch("core.maintenance.detector.git_output", return_value="staging"), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", return_value=empty_gh):
+                report = audit_repository(tmp_dir, "sjvtdm", include_ollama_analysis=False)
+
+            assessments = classify_repository_update_risks(report)
+            summary = summarize_risk_assessments(assessments)
+
+            self.assertGreaterEqual(summary[RISK_BREAKING], 1)
+            self.assertGreaterEqual(summary[RISK_REVIEW], 2)
+
+            by_subject = {item.subject: item for item in assessments}
+            # Pip-less venv + pip install in deploy.sh -> BREAKING CHANGE
+            pip_risk = by_subject["Virtualenv & Deployment Pip Compatibility"]
+            self.assertEqual(pip_risk.risk_level, RISK_BREAKING)
+            self.assertTrue(pip_risk.breaking_change)
+            self.assertIn("deploy.sh", pip_risk.affected_files)
+
+            # Python 3.11 in Jenkins vs 3.15.2 in GHA -> REVIEW REQUIRED with target 3.15.2
+            py_risk = by_subject["Runtime Alignment · Python"]
+            self.assertEqual(py_risk.risk_level, RISK_REVIEW)
+            self.assertEqual(py_risk.target_version, "3.15.2")
+            self.assertTrue(py_risk.sources)
+            self.assertTrue(any("UNKNOWN" in u for u in py_risk.uncertainties))
+
+            # PostgreSQL 18 in CI vs 16 in Docker -> LOW RISK (accepted difference, never forced)
+            pg_risk = by_subject["Service Compatibility · PostgreSQL"]
+            self.assertEqual(pg_risk.risk_level, RISK_LOW)
+            self.assertFalse(pg_risk.breaking_change)
+            self.assertTrue(pg_risk.sources)
+            self.assertTrue(pg_risk.uncertainties)
 
 
 if __name__ == "__main__":

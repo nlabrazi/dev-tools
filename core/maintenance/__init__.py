@@ -1,3 +1,9 @@
+from core.maintenance.analyzer import (
+    classify_repository_update_risks,
+    extract_release_notes_signals,
+    parse_dashboard_pending_update,
+    summarize_risk_assessments,
+)
 from core.maintenance.detector import (
     detect_deployment_files,
     detect_project_stacks,
@@ -34,6 +40,7 @@ from core.maintenance.models import (
     RenovatePRInfo,
     RenovateUpdateItem,
     StackComponent,
+    UpdateRiskAssessment,
 )
 from core.maintenance.renovate import (
     analyze_renovate_pr,
@@ -85,14 +92,17 @@ __all__ = [
     "STATUS_SKIPPED",
     "STATUS_UNKNOWN",
     "StackComponent",
+    "UpdateRiskAssessment",
     "analyze_renovate_pr",
     "ask_maintenance_action",
     "audit_repository",
     "build_environment_matrix",
     "build_fallback_pr_analysis",
+    "classify_repository_update_risks",
     "collect_declared_versions",
     "detect_deployment_files",
     "detect_project_stacks",
+    "extract_release_notes_signals",
     "format_executive_summary_text",
     "format_report_json",
     "format_report_markdown",
@@ -102,10 +112,12 @@ __all__ = [
     "inspect_open_renovate_prs",
     "inspect_renovate_config",
     "inspect_single_renovate_pr",
+    "parse_dashboard_pending_update",
     "parse_renovate_pr_body",
     "render_audit_report",
     "render_maintenance_menu",
     "render_renovate_pr_analysis",
     "run_dependency_maintenance_for_repo",
     "save_audit_report",
+    "summarize_risk_assessments",
 ]
