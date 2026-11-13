@@ -1,3 +1,9 @@
+from core.maintenance.detector import (
+    detect_deployment_files,
+    detect_project_stacks,
+    inspect_git_state,
+    inspect_renovate_config,
+)
 from core.maintenance.models import (
     DRIFT_ACCEPTED,
     DRIFT_ALIGNED,
@@ -26,7 +32,6 @@ from core.maintenance.models import (
     StackComponent,
 )
 from core.maintenance.workflow import (
-    MAINTENANCE_MENU_CHOICES,
     ask_maintenance_action,
     render_maintenance_menu,
     run_dependency_maintenance_for_repo,
@@ -43,7 +48,6 @@ __all__ = [
     "DependencyDashboardInfo",
     "EnvironmentMatrixRow",
     "GitStateInfo",
-    "MAINTENANCE_MENU_CHOICES",
     "RISK_BLOCKED",
     "RISK_BREAKING",
     "RISK_LOW",
@@ -60,6 +64,10 @@ __all__ = [
     "STATUS_UNKNOWN",
     "StackComponent",
     "ask_maintenance_action",
+    "detect_deployment_files",
+    "detect_project_stacks",
+    "inspect_git_state",
+    "inspect_renovate_config",
     "render_maintenance_menu",
     "run_dependency_maintenance_for_repo",
 ]
