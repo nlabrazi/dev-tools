@@ -24,6 +24,7 @@ from core.maintenance import (
     RenovatePRInfo,
     RenovateUpdateItem,
     analyze_renovate_pr,
+    apply_migration_changes,
     audit_repository,
     build_environment_matrix,
     classify_repository_update_risks,
@@ -38,11 +39,15 @@ from core.maintenance import (
     inspect_renovate_config,
     parse_dashboard_pending_update,
     parse_renovate_pr_body,
+    prepare_migration_changes,
     render_audit_report,
+    render_migration_application_result,
     render_migration_plan,
+    render_proposed_changes_preview,
     render_risk_assessments,
     save_audit_report,
     summarize_risk_assessments,
+    verify_migration_git_preconditions,
 )
 from core.ollama import OllamaError
 from utils.common import set_dry_run
@@ -567,6 +572,96 @@ class MigrationPlanGenerationTests(unittest.TestCase):
             output = buffer.getvalue()
             self.assertIn("Risk Classification & Target Versions", output)
             self.assertIn("Migration & Rollback Plan", output)
+
+
+class ControlledMigrationPreparationTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_dry_run(False)
+
+    def test_prepares_and_applies_controlled_changes_with_branch_and_dry_run_guards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / ".git" / "info").mkdir(parents=True)
+            (root / "Jenkinsfile").write_text(
+                "pipeline { agent { docker { image 'python:3.11-slim' } } }\n",
+                encoding="utf-8",
+            )
+            wf_dir = root / ".github" / "workflows"
+            wf_dir.mkdir(parents=True)
+            (wf_dir / "tests.yml").write_text(
+                'steps:\n  - with:\n      python-version: "3.15.2"\n',
+                encoding="utf-8",
+            )
+            venv_target = root / ".venv-315"
+            (venv_target / "bin").mkdir(parents=True)
+            (venv_target / "bin" / "python").write_text("", encoding="utf-8")
+            os.symlink(".venv-315", root / ".venv")
+            (root / "deploy.sh").write_text("#!/bin/bash\npip install -r requirements.txt\n", encoding="utf-8")
+
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch(
+                "core.maintenance.detector.git_output",
+                side_effect=["staging", "?? .venv\n", "0\t1"],
+            ), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", return_value=empty_gh):
+                report = audit_repository(tmp_dir, "sjvtdm", include_ollama_analysis=False)
+
+            proposals = prepare_migration_changes(report)
+            by_path = {p.path: p for p in proposals}
+            self.assertIn("renovate.json", by_path)
+            self.assertIn(".git/info/exclude", by_path)
+            self.assertIn("Jenkinsfile", by_path)
+            self.assertIn("deploy.sh", by_path)
+            self.assertIn("python:3.15.2-slim", by_path["Jenkinsfile"].new_content)
+            self.assertIn("uv\" pip install", by_path["deploy.sh"].new_content)
+
+            # 1) Wrong branch must abort without modifying files
+            with patch(
+                "core.maintenance.detector.git_output",
+                side_effect=["master", "", "0\t0"],
+            ), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ):
+                aborted = apply_migration_changes(tmp_dir, proposals, expected_branch="staging")
+            self.assertEqual(aborted.status, "aborted")
+            self.assertFalse((root / "renovate.json").exists())
+
+            # 2) Dry-run on staging must simulate without writing files
+            set_dry_run(True)
+            with patch(
+                "core.maintenance.detector.git_output",
+                side_effect=["staging", "", "0\t0"],
+            ), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ):
+                sim = apply_migration_changes(tmp_dir, proposals, expected_branch="staging")
+            self.assertEqual(sim.status, "dry-run")
+            self.assertFalse((root / "renovate.json").exists())
+
+            # 3) Prod on staging writes the proposed changes
+            set_dry_run(False)
+            with patch(
+                "core.maintenance.detector.git_output",
+                side_effect=["staging", "", "0\t0"],
+            ), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ):
+                applied = apply_migration_changes(tmp_dir, proposals, expected_branch="staging")
+            self.assertEqual(applied.status, "applied")
+            self.assertTrue((root / "renovate.json").is_file())
+            self.assertIn("python:3.15.2-slim", (root / "Jenkinsfile").read_text(encoding="utf-8"))
+            self.assertIn(".venv", (root / ".git" / "info" / "exclude").read_text(encoding="utf-8"))
+
+            buffer = io.StringIO()
+            test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+            render_proposed_changes_preview(proposals, target_console=test_console)
+            render_migration_application_result(applied, target_console=test_console)
+            self.assertIn("Proposed Change #1", buffer.getvalue())
 
 
 if __name__ == "__main__":

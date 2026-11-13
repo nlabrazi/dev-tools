@@ -196,6 +196,29 @@ class MigrationFileTarget:
 
 
 @dataclass(frozen=True)
+class ProposedFileChange:
+    path: str
+    action: str
+    reason: str
+    preview_diff: str
+    new_content: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class MigrationApplicationResult:
+    status: str
+    applied_files: list[str] = field(default_factory=list)
+    skipped_files: list[str] = field(default_factory=list)
+    messages: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class RollbackPlan:
     strategy: str
     backup_target: str

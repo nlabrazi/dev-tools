@@ -10,6 +10,11 @@ from core.maintenance.detector import (
     inspect_renovate_config,
 )
 from core.maintenance.environments import build_environment_matrix, collect_declared_versions
+from core.maintenance.migrator import (
+    apply_migration_changes,
+    prepare_migration_changes,
+    verify_migration_git_preconditions,
+)
 from core.maintenance.models import (
     DRIFT_PROBLEMATIC,
     RISK_BLOCKED,
@@ -26,7 +31,9 @@ from core.maintenance.renovate import (
 )
 from core.maintenance.reporter import (
     render_audit_report,
+    render_migration_application_result,
     render_migration_plan,
+    render_proposed_changes_preview,
     render_renovate_pr_analysis,
     render_risk_assessments,
     save_audit_report,
@@ -34,7 +41,7 @@ from core.maintenance.reporter import (
 from utils.console import ask_yes_no, ui_panel, ui_table
 
 console = Console()
-MAINTENANCE_MENU_CHOICES = ("1", "2", "3", "4", "q")
+MAINTENANCE_MENU_CHOICES = ("1", "2", "3", "4", "5", "q")
 
 
 def _compute_overall_status(
@@ -174,7 +181,8 @@ def render_maintenance_menu(repo_name: str) -> None:
     table.add_row("1", "Full Audit & PR Analysis", "Audit stack, Renovate, version matrix, CI, open PRs, and migration plan.")
     table.add_row("2", "Inspect Specific PR", "Analyze any PR number (open or merged) with Ollama for breaking changes.")
     table.add_row("3", "Analyze Risks & Migration Plan", "Classify update risks, files to review, validation steps, and rollback plan.")
-    table.add_row("4", "Export Audit Report", "Save the audit and migration report as JSON and Markdown.")
+    table.add_row("4", "Prepare Migration Changes", "Preview and apply controlled local migration changes on staging.")
+    table.add_row("5", "Export Audit Report", "Save the audit and migration report as JSON and Markdown.")
     table.add_row("q", "Back", "Return to the main menu.")
     console.print(table)
 
@@ -261,6 +269,28 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
             continue
 
         if choice == "4":
+            if last_report is None:
+                with console.status(f"[bold cyan]Preparing migration changes for {repo_name}...[/]", spinner="dots"):
+                    last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=False)
+            ok, issues = verify_migration_git_preconditions(repo_path)
+            if not ok:
+                console.print(
+                    ui_panel(
+                        "\n".join(f"- {msg}" for msg in issues),
+                        title="Git Precondition Check Failed",
+                        tone="danger",
+                        compact=True,
+                    )
+                )
+                continue
+            proposals = prepare_migration_changes(last_report)
+            render_proposed_changes_preview(proposals, target_console=console)
+            if proposals and ask_yes_no("Apply these controlled migration changes locally?", default="n"):
+                app_result = apply_migration_changes(repo_path, proposals)
+                render_migration_application_result(app_result, target_console=console)
+            continue
+
+        if choice == "5":
             if last_report is None:
                 with console.status(f"[bold cyan]Running audit on {repo_name} before export...[/]", spinner="dots"):
                     last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=True)

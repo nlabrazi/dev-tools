@@ -15,7 +15,9 @@ from core.maintenance.models import (
     STATUS_PASS,
     STATUS_PENDING,
     AuditReport,
+    MigrationApplicationResult,
     MigrationPlan,
+    ProposedFileChange,
     RenovatePRInfo,
     UpdateRiskAssessment,
 )
@@ -386,6 +388,62 @@ def render_migration_plan(
             tone="info",
         )
     )
+
+
+def render_proposed_changes_preview(
+    changes: list[ProposedFileChange],
+    *,
+    target_console: Console | None = None,
+) -> None:
+    out = target_console or console
+    if not changes:
+        out.print(
+            ui_panel(
+                "No automatic local file adaptations needed for this repository.",
+                title="Migration Changes Preview",
+                tone="success",
+                compact=True,
+            )
+        )
+        return
+
+    for idx, change in enumerate(changes, start=1):
+        body = (
+            f"[bold white]File:[/] [cyan]{change.path}[/]  [dim]|[/]  [bold white]Action:[/] {change.action}\n"
+            f"[bold white]Reason:[/] {change.reason}\n\n"
+            f"[dim]{change.preview_diff}[/]"
+        )
+        out.print(
+            ui_panel(
+                body,
+                title=f"Proposed Change #{idx} · {change.path}",
+                tone="info",
+            )
+        )
+
+
+def render_migration_application_result(
+    result: MigrationApplicationResult,
+    *,
+    target_console: Console | None = None,
+) -> None:
+    out = target_console or console
+    tone_map = {
+        "applied": "success",
+        "dry-run": "info",
+        "no-op": "info",
+        "aborted": "danger",
+    }
+    tone = tone_map.get(result.status, "warning")
+    lines = [f"[bold white]Status:[/] {result.status.upper()}"]
+    if result.applied_files:
+        lines.append("[bold green]Files:[/] " + ", ".join(result.applied_files))
+    if result.skipped_files:
+        lines.append("[bold yellow]Skipped:[/] " + ", ".join(result.skipped_files))
+    for msg in result.messages:
+        lines.append(f"- {msg}")
+    out.print(ui_panel("\n".join(lines), title="Migration Changes Result", tone=tone, compact=True))
+
 
 
 
