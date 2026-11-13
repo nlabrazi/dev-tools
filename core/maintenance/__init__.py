@@ -14,6 +14,11 @@ from core.maintenance.environments import (
     build_environment_matrix,
     collect_declared_versions,
 )
+from core.maintenance.git_ops import (
+    merge_renovate_pr_to_staging,
+    run_maintenance_auto_commit,
+    run_maintenance_promote_to_base,
+)
 from core.maintenance.migrator import (
     apply_migration_changes,
     prepare_migration_changes,
@@ -143,6 +148,7 @@ __all__ = [
     "inspect_open_renovate_prs",
     "inspect_renovate_config",
     "inspect_single_renovate_pr",
+    "merge_renovate_pr_to_staging",
     "parse_dashboard_pending_update",
     "parse_python_test_output",
     "parse_renovate_pr_body",
@@ -156,6 +162,8 @@ __all__ = [
     "render_risk_assessments",
     "render_validation_report",
     "run_dependency_maintenance_for_repo",
+    "run_maintenance_auto_commit",
+    "run_maintenance_promote_to_base",
     "run_migration_validations",
     "save_audit_report",
     "summarize_risk_assessments",

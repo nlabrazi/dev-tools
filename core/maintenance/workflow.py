@@ -10,6 +10,11 @@ from core.maintenance.detector import (
     inspect_renovate_config,
 )
 from core.maintenance.environments import build_environment_matrix, collect_declared_versions
+from core.maintenance.git_ops import (
+    merge_renovate_pr_to_staging,
+    run_maintenance_auto_commit,
+    run_maintenance_promote_to_base,
+)
 from core.maintenance.migrator import (
     apply_migration_changes,
     prepare_migration_changes,
@@ -43,7 +48,7 @@ from core.maintenance.validator import run_migration_validations
 from utils.console import ask_yes_no, ui_panel, ui_table
 
 console = Console()
-MAINTENANCE_MENU_CHOICES = ("1", "2", "3", "4", "5", "6", "q")
+MAINTENANCE_MENU_CHOICES = ("1", "2", "3", "4", "5", "6", "7", "q")
 
 
 def _compute_overall_status(
@@ -175,7 +180,7 @@ def audit_repository(
 def render_maintenance_menu(repo_name: str) -> None:
     table = ui_table(
         title=f"Dependency Maintenance · {repo_name}",
-        caption="Read-only audit, Ollama PR analysis, and migration planning (Phase 1 & 2).",
+        caption="Read-only audit, Ollama PR analysis, migration planning, and Git workflows.",
     )
     table.add_column("Key", justify="center", style="bold cyan", no_wrap=True)
     table.add_column("Action", style="bold white", no_wrap=True)
@@ -185,7 +190,8 @@ def render_maintenance_menu(repo_name: str) -> None:
     table.add_row("3", "Analyze Risks & Migration Plan", "Classify update risks, files to review, validation steps, and rollback plan.")
     table.add_row("4", "Prepare Migration Changes", "Preview and apply controlled local migration changes on staging.")
     table.add_row("5", "Run & Report Validations", "Run tests and report PASS, FAIL, SKIPPED, PENDING, and UNKNOWN statuses.")
-    table.add_row("6", "Export Audit Report", "Save the audit and migration report as JSON and Markdown.")
+    table.add_row("6", "Git Workflows (Commit / Merge / Promote)", "Commit on staging, merge a Renovate PR into staging, or promote staging → base.")
+    table.add_row("7", "Export Audit Report", "Save the audit and migration report as JSON and Markdown.")
     table.add_row("q", "Back", "Return to the main menu.")
     console.print(table)
 
@@ -304,6 +310,40 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
             continue
 
         if choice == "6":
+            if last_report is None:
+                with console.status(f"[bold cyan]Inspecting repository state for {repo_name}...[/]", spinner="dots"):
+                    last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=False)
+            git_action = Prompt.ask(
+                "[bold white]Git workflow action (1=Auto-Commit on staging, 2=Merge Renovate PR to staging, 3=Promote staging → base, b=Back)[/]",
+                choices=["1", "2", "3", "b"],
+                default="b",
+                show_choices=False,
+            ).lower()
+            if git_action == "1":
+                run_maintenance_auto_commit(repo_path, repo_name, target_console=console)
+            elif git_action == "2":
+                if not last_report.open_prs:
+                    console.print(
+                        ui_panel(
+                            "No open Renovate pull requests found for this repository.",
+                            title="Merge Renovate PR",
+                            tone="info",
+                            compact=True,
+                        )
+                    )
+                else:
+                    for pr in last_report.open_prs:
+                        merge_renovate_pr_to_staging(
+                            repo_path,
+                            repo_name,
+                            pr,
+                            target_console=console,
+                        )
+            elif git_action == "3":
+                run_maintenance_promote_to_base(repo_path, repo_name, target_console=console)
+            continue
+
+        if choice == "7":
             if last_report is None:
                 with console.status(f"[bold cyan]Running audit on {repo_name} before export...[/]", spinner="dots"):
                     last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=True)

@@ -38,6 +38,7 @@ from core.maintenance import (
     inspect_dependency_dashboard,
     inspect_git_state,
     inspect_renovate_config,
+    merge_renovate_pr_to_staging,
     parse_dashboard_pending_update,
     parse_python_test_output,
     parse_renovate_pr_body,
@@ -48,6 +49,8 @@ from core.maintenance import (
     render_proposed_changes_preview,
     render_risk_assessments,
     render_validation_report,
+    run_maintenance_auto_commit,
+    run_maintenance_promote_to_base,
     run_migration_validations,
     save_audit_report,
     summarize_risk_assessments,
@@ -728,6 +731,127 @@ class MigrationValidationTests(unittest.TestCase):
             rendered = buffer.getvalue()
             self.assertIn("Validation Report", rendered)
             self.assertIn("SKIPPED", rendered)
+
+
+class MaintenanceGitWorkflowIntegrationTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_dry_run(False)
+
+    def test_merge_renovate_pr_blocks_failed_ci_and_non_staging_targets(self) -> None:
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+
+        failed_pr = RenovatePRInfo(
+            number=14,
+            title="chore(deps): update dependency aiohttp to v3.11.0",
+            head_branch="renovate/aiohttp-3.x",
+            base_branch="staging",
+            ci_status=STATUS_FAIL,
+        )
+        with patch("core.maintenance.git_ops.run_command") as mock_run:
+            status = merge_renovate_pr_to_staging("/tmp/repo", "repo", failed_pr, target_console=test_console)
+        self.assertEqual(status, "blocked")
+        mock_run.assert_not_called()
+
+        master_pr = RenovatePRInfo(
+            number=15,
+            title="chore(deps): update dependency requests",
+            head_branch="renovate/requests-2.x",
+            base_branch="master",
+            is_onboarding=False,
+            ci_status=STATUS_PASS,
+        )
+        with patch("core.maintenance.git_ops.run_command") as mock_run:
+            status2 = merge_renovate_pr_to_staging("/tmp/repo", "repo", master_pr, target_console=test_console)
+        self.assertEqual(status2, "blocked")
+        mock_run.assert_not_called()
+
+    def test_merge_renovate_pr_respects_dry_run_and_executes_in_prod_with_sync(self) -> None:
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+
+        passing_pr = RenovatePRInfo(
+            number=18,
+            title="chore(deps): update python docker tag to v3.15.2",
+            head_branch="renovate/python-3.x",
+            base_branch="staging",
+            ci_status=STATUS_PASS,
+        )
+
+        set_dry_run(True)
+        with patch("core.maintenance.git_ops.ask_yes_no", return_value=True), patch(
+            "core.maintenance.git_ops.run_command"
+        ) as mock_run:
+            dry_status = merge_renovate_pr_to_staging("/tmp/repo", "repo", passing_pr, target_console=test_console)
+        self.assertEqual(dry_status, "dry-run")
+        mock_run.assert_not_called()
+
+        set_dry_run(False)
+        ok_proc = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="Merged\n", stderr="")
+        with patch("core.maintenance.git_ops.ask_yes_no", side_effect=[True, True]), patch(
+            "core.maintenance.git_ops.run_command", return_value=ok_proc
+        ) as mock_run, patch("core.maintenance.git_ops.pull_ff_only", return_value="pulled") as mock_pull:
+            prod_status = merge_renovate_pr_to_staging("/tmp/repo", "repo", passing_pr, target_console=test_console)
+        self.assertEqual(prod_status, "merged")
+        mock_run.assert_called_once()
+        mock_pull.assert_called_once_with("/tmp/repo", "repo", "staging")
+
+    def test_delegates_to_commit_and_merge_workflows_with_safety_checks(self) -> None:
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+
+        # Auto-commit blocked on master
+        with patch(
+            "core.maintenance.detector.git_output",
+            side_effect=["master", "", "0\t0"],
+        ), patch(
+            "core.maintenance.detector.resolve_repo_base_branch",
+            return_value=("master", "resolved"),
+        ), patch("core.maintenance.git_ops.auto_commit_all_repos") as mock_commit:
+            res_blocked = run_maintenance_auto_commit("/tmp/root/repo", "repo", target_console=test_console)
+        self.assertIsNone(res_blocked)
+        mock_commit.assert_not_called()
+
+        # Auto-commit allowed on staging after confirmation
+        with patch(
+            "core.maintenance.detector.git_output",
+            side_effect=["staging", " M README.md\n", "1\t0"],
+        ), patch(
+            "core.maintenance.detector.resolve_repo_base_branch",
+            return_value=("master", "resolved"),
+        ), patch("core.maintenance.git_ops.ask_yes_no", return_value=True), patch(
+            "core.maintenance.git_ops.auto_commit_all_repos",
+            return_value={"committed": 1, "pushed": 1},
+        ) as mock_commit:
+            res_ok = run_maintenance_auto_commit("/tmp/root/repo", "repo", target_console=test_console)
+        self.assertEqual(res_ok, {"committed": 1, "pushed": 1})
+        mock_commit.assert_called_once()
+
+        # Promote blocked when worktree is dirty
+        with patch(
+            "core.maintenance.detector.git_output",
+            side_effect=["staging", " M README.md\n", "1\t0"],
+        ), patch(
+            "core.maintenance.detector.resolve_repo_base_branch",
+            return_value=("master", "resolved"),
+        ), patch("core.maintenance.git_ops.merge_all_repos") as mock_merge:
+            prom_blocked = run_maintenance_promote_to_base("/tmp/root/repo", "repo", target_console=test_console)
+        self.assertEqual(prom_blocked, "blocked")
+        mock_merge.assert_not_called()
+
+        # Promote allowed when clean and confirmed
+        with patch(
+            "core.maintenance.detector.git_output",
+            side_effect=["staging", "", "1\t0"],
+        ), patch(
+            "core.maintenance.detector.resolve_repo_base_branch",
+            return_value=("master", "resolved"),
+        ), patch("core.maintenance.git_ops.ask_yes_no", return_value=True), patch(
+            "core.maintenance.git_ops.merge_all_repos"
+        ) as mock_merge:
+            prom_ok = run_maintenance_promote_to_base("/tmp/root/repo", "repo", target_console=test_console)
+        self.assertEqual(prom_ok, "executed")
+        mock_merge.assert_called_once()
 
 
 if __name__ == "__main__":
