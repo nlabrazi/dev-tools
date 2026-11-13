@@ -168,26 +168,6 @@ class CIStatusSummary:
 
 
 @dataclass(frozen=True)
-class AuditReport:
-    repo_name: str
-    repo_path: str
-    generated_at: str
-    git_state: GitStateInfo
-    stacks: list[StackComponent]
-    renovate_config: RenovateConfigInfo
-    dashboard: DependencyDashboardInfo
-    open_prs: list[RenovatePRInfo]
-    ci_summary: CIStatusSummary
-    env_matrix: list[EnvironmentMatrixRow]
-    deployment_files: list[str] = field(default_factory=list)
-    reservations: list[str] = field(default_factory=list)
-    overall_status: str = "AUDIT COMPLETE"
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
 class UpdateRiskAssessment:
     subject: str
     category: str
@@ -205,4 +185,62 @@ class UpdateRiskAssessment:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class MigrationFileTarget:
+    path: str
+    category: str
+    reason: str
+    suggested_change: str
+
+
+@dataclass(frozen=True)
+class RollbackPlan:
+    strategy: str
+    backup_target: str
+    steps: list[str] = field(default_factory=list)
+    preconditions: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class MigrationPlan:
+    repo_name: str
+    generated_at: str
+    summary: str
+    target_versions: dict[str, str] = field(default_factory=dict)
+    files_to_review: list[MigrationFileTarget] = field(default_factory=list)
+    ordered_steps: list[str] = field(default_factory=list)
+    validation_steps: list[str] = field(default_factory=list)
+    rollback_plan: RollbackPlan = field(
+        default_factory=lambda: RollbackPlan(strategy="git-revert", backup_target="staging")
+    )
+    sources: list[str] = field(default_factory=list)
+    uncertainties: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class AuditReport:
+    repo_name: str
+    repo_path: str
+    generated_at: str
+    git_state: GitStateInfo
+    stacks: list[StackComponent]
+    renovate_config: RenovateConfigInfo
+    dashboard: DependencyDashboardInfo
+    open_prs: list[RenovatePRInfo]
+    ci_summary: CIStatusSummary
+    env_matrix: list[EnvironmentMatrixRow]
+    deployment_files: list[str] = field(default_factory=list)
+    reservations: list[str] = field(default_factory=list)
+    overall_status: str = "AUDIT COMPLETE"
+    risk_assessments: list[UpdateRiskAssessment] = field(default_factory=list)
+    migration_plan: MigrationPlan | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
 

@@ -3,6 +3,7 @@ from datetime import datetime
 from rich.console import Console
 from rich.prompt import Prompt
 
+from core.maintenance.analyzer import classify_repository_update_risks
 from core.maintenance.detector import (
     detect_project_stacks,
     inspect_git_state,
@@ -16,6 +17,7 @@ from core.maintenance.models import (
     STATUS_UNKNOWN,
     AuditReport,
 )
+from core.maintenance.planner import generate_migration_plan
 from core.maintenance.renovate import (
     inspect_ci_status,
     inspect_dependency_dashboard,
@@ -24,13 +26,15 @@ from core.maintenance.renovate import (
 )
 from core.maintenance.reporter import (
     render_audit_report,
+    render_migration_plan,
     render_renovate_pr_analysis,
+    render_risk_assessments,
     save_audit_report,
 )
 from utils.console import ask_yes_no, ui_panel, ui_table
 
 console = Console()
-MAINTENANCE_MENU_CHOICES = ("1", "2", "3", "q")
+MAINTENANCE_MENU_CHOICES = ("1", "2", "3", "4", "q")
 
 
 def _compute_overall_status(
@@ -122,7 +126,7 @@ def audit_repository(
         has_reservations=bool(reservations),
     )
 
-    return AuditReport(
+    base_report = AuditReport(
         repo_name=repo_name,
         repo_path=repo_path,
         generated_at=timestamp,
@@ -137,19 +141,40 @@ def audit_repository(
         reservations=reservations,
         overall_status=overall_status,
     )
+    risk_assessments = classify_repository_update_risks(base_report)
+    migration_plan = generate_migration_plan(base_report, risk_assessments, now=now)
+
+    return AuditReport(
+        repo_name=base_report.repo_name,
+        repo_path=base_report.repo_path,
+        generated_at=base_report.generated_at,
+        git_state=base_report.git_state,
+        stacks=base_report.stacks,
+        renovate_config=base_report.renovate_config,
+        dashboard=base_report.dashboard,
+        open_prs=base_report.open_prs,
+        ci_summary=base_report.ci_summary,
+        env_matrix=base_report.env_matrix,
+        deployment_files=base_report.deployment_files,
+        reservations=base_report.reservations,
+        overall_status=base_report.overall_status,
+        risk_assessments=risk_assessments,
+        migration_plan=migration_plan,
+    )
 
 
 def render_maintenance_menu(repo_name: str) -> None:
     table = ui_table(
         title=f"Dependency Maintenance · {repo_name}",
-        caption="Read-only audit and Ollama-assisted Renovate PR analysis (Phase 1).",
+        caption="Read-only audit, Ollama PR analysis, and migration planning (Phase 1 & 2).",
     )
     table.add_column("Key", justify="center", style="bold cyan", no_wrap=True)
     table.add_column("Action", style="bold white", no_wrap=True)
     table.add_column("Description", style="white")
-    table.add_row("1", "Full Audit & PR Analysis", "Audit stack, Renovate, version matrix, CI and analyze open PRs with Ollama.")
+    table.add_row("1", "Full Audit & PR Analysis", "Audit stack, Renovate, version matrix, CI, open PRs, and migration plan.")
     table.add_row("2", "Inspect Specific PR", "Analyze any PR number (open or merged) with Ollama for breaking changes.")
-    table.add_row("3", "Export Audit Report", "Save the audit report as JSON and Markdown.")
+    table.add_row("3", "Analyze Risks & Migration Plan", "Classify update risks, files to review, validation steps, and rollback plan.")
+    table.add_row("4", "Export Audit Report", "Save the audit and migration report as JSON and Markdown.")
     table.add_row("q", "Back", "Return to the main menu.")
     console.print(table)
 
@@ -227,6 +252,15 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
             continue
 
         if choice == "3":
+            if last_report is None:
+                with console.status(f"[bold cyan]Analyzing risks and preparing migration plan for {repo_name}...[/]", spinner="dots"):
+                    last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=True)
+            render_risk_assessments(last_report.risk_assessments, target_console=console)
+            if last_report.migration_plan is not None:
+                render_migration_plan(last_report.migration_plan, target_console=console)
+            continue
+
+        if choice == "4":
             if last_report is None:
                 with console.status(f"[bold cyan]Running audit on {repo_name} before export...[/]", spinner="dots"):
                     last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=True)

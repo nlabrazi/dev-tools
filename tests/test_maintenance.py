@@ -32,12 +32,15 @@ from core.maintenance import (
     extract_release_notes_signals,
     format_report_json,
     format_report_markdown,
+    generate_migration_plan,
     inspect_dependency_dashboard,
     inspect_git_state,
     inspect_renovate_config,
     parse_dashboard_pending_update,
     parse_renovate_pr_body,
     render_audit_report,
+    render_migration_plan,
+    render_risk_assessments,
     save_audit_report,
     summarize_risk_assessments,
 )
@@ -504,6 +507,66 @@ class UpdateRiskClassificationTests(unittest.TestCase):
             self.assertFalse(pg_risk.breaking_change)
             self.assertTrue(pg_risk.sources)
             self.assertTrue(pg_risk.uncertainties)
+
+
+class MigrationPlanGenerationTests(unittest.TestCase):
+    def test_generates_migration_and_rollback_plan_for_python_and_ci_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "requirements.txt").write_text("feedparser\n", encoding="utf-8")
+            (root / "Jenkinsfile").write_text(
+                "pipeline { agent { docker { image 'python:3.11' } } }\n",
+                encoding="utf-8",
+            )
+            wf_dir = root / ".github" / "workflows"
+            wf_dir.mkdir(parents=True)
+            (wf_dir / "tests.yml").write_text(
+                'services:\n  postgres:\n    image: postgres:18\nsteps:\n  - with:\n      python-version: "3.15.2"\n',
+                encoding="utf-8",
+            )
+            (root / "docker-compose.yml").write_text(
+                "services:\n  db:\n    image: postgres:16\n",
+                encoding="utf-8",
+            )
+            venv_target = root / ".venv-315"
+            (venv_target / "bin").mkdir(parents=True)
+            (venv_target / "bin" / "python").write_text("", encoding="utf-8")
+            os.symlink(".venv-315", root / ".venv")
+            (root / "deploy.sh").write_text("#!/bin/bash\npip install -r requirements.txt\n", encoding="utf-8")
+
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch(
+                "core.maintenance.detector.git_output",
+                side_effect=["staging", "?? .venv\n", "0\t1"],
+            ), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", return_value=empty_gh):
+                report = audit_repository(tmp_dir, "sjvtdm", include_ollama_analysis=False)
+
+            plan = generate_migration_plan(report)
+            self.assertEqual(plan.repo_name, "sjvtdm")
+            self.assertEqual(plan.target_versions["Python"], "3.15.2")
+            self.assertIn("Keep", plan.target_versions["PostgreSQL"])
+
+            file_paths = [f.path for f in plan.files_to_review]
+            self.assertIn("Jenkinsfile", file_paths)
+            self.assertIn("deploy.sh", file_paths)
+            self.assertIn(".git/info/exclude", file_paths)
+            self.assertIn("renovate.json", file_paths)
+
+            self.assertEqual(plan.rollback_plan.strategy, "virtualenv-symlink-and-git-revert")
+            self.assertIn(".venv-315-backup", plan.rollback_plan.backup_target)
+            self.assertTrue(any("uv pip" in step for step in plan.ordered_steps))
+            self.assertTrue(any("Sentinel" in step for step in plan.validation_steps))
+
+            buffer = io.StringIO()
+            test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+            render_risk_assessments(report.risk_assessments, target_console=test_console)
+            render_migration_plan(plan, target_console=test_console)
+            output = buffer.getvalue()
+            self.assertIn("Risk Classification & Target Versions", output)
+            self.assertIn("Migration & Rollback Plan", output)
 
 
 if __name__ == "__main__":

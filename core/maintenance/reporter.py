@@ -15,7 +15,9 @@ from core.maintenance.models import (
     STATUS_PASS,
     STATUS_PENDING,
     AuditReport,
+    MigrationPlan,
     RenovatePRInfo,
+    UpdateRiskAssessment,
 )
 from utils.common import is_dry_run
 from utils.console import ui_panel, ui_table
@@ -274,13 +276,117 @@ def render_audit_report(report: AuditReport, *, target_console: Console | None =
             )
         )
 
+    if report.risk_assessments:
+        render_risk_assessments(report.risk_assessments, target_console=out)
+    if report.migration_plan is not None:
+        render_migration_plan(report.migration_plan, target_console=out)
+
     out.print(
         ui_panel(
             format_executive_summary_text(report),
-            title="6 · Final Maintenance Summary",
+            title="Final Maintenance Summary",
             tone="warning" if report.reservations else "success",
         )
     )
+
+
+def render_risk_assessments(
+    assessments: list[UpdateRiskAssessment],
+    *,
+    target_console: Console | None = None,
+) -> None:
+    out = target_console or console
+    table = ui_table(
+        title="6 · Risk Classification & Target Versions",
+        caption="Recommendations include their sources and known uncertainties.",
+        show_lines=True,
+    )
+    table.add_column("Subject", style="bold white")
+    table.add_column("Current → Proposed", justify="center")
+    table.add_column("Target", justify="center", style="cyan")
+    table.add_column("Risk", justify="center", no_wrap=True)
+    table.add_column("Recommendation, Sources & Uncertainties", style="white")
+
+    if not assessments:
+        table.add_row("(none)", "-", "-", _risk_badge(RISK_LOW), "No update or alignment risk identified.")
+        out.print(table)
+        return
+
+    for item in assessments:
+        details_lines = [item.recommendation]
+        if item.affected_files:
+            details_lines.append(f"[bold yellow]Files:[/] {', '.join(item.affected_files)}")
+        if item.sources:
+            details_lines.append(f"[dim]Sources: {'; '.join(item.sources[:3])}[/]")
+        if item.uncertainties:
+            details_lines.append(f"[yellow]Uncertainties: {'; '.join(item.uncertainties[:2])}[/]")
+
+        table.add_row(
+            item.subject,
+            f"{item.current_version} → {item.proposed_version}",
+            item.target_version,
+            _risk_badge(item.risk_level),
+            "\n".join(details_lines),
+        )
+    out.print(table)
+
+
+def render_migration_plan(
+    plan: MigrationPlan,
+    *,
+    target_console: Console | None = None,
+) -> None:
+    out = target_console or console
+
+    if plan.files_to_review:
+        file_table = ui_table(title="7 · Files to Review / Modify", show_lines=True)
+        file_table.add_column("File", style="bold cyan", no_wrap=True)
+        file_table.add_column("Category", justify="center", style="white", no_wrap=True)
+        file_table.add_column("Reason", style="yellow")
+        file_table.add_column("Suggested Action", style="white")
+        for target in plan.files_to_review:
+            file_table.add_row(target.path, target.category, target.reason, target.suggested_change)
+        out.print(file_table)
+
+    plan_lines = [f"[bold white]{plan.summary}[/]"]
+    if plan.target_versions:
+        plan_lines.append("")
+        plan_lines.append("[bold cyan]Target Versions[/]")
+        for comp, ver in plan.target_versions.items():
+            plan_lines.append(f"- [bold]{comp}:[/] {ver}")
+
+    if plan.ordered_steps:
+        plan_lines.append("")
+        plan_lines.append("[bold cyan]Migration Steps[/]")
+        plan_lines.extend(plan.ordered_steps)
+
+    if plan.validation_steps:
+        plan_lines.append("")
+        plan_lines.append("[bold cyan]Validation Checklist[/]")
+        plan_lines.extend(f"- {step}" for step in plan.validation_steps)
+
+    rb = plan.rollback_plan
+    plan_lines.append("")
+    plan_lines.append(f"[bold magenta]Rollback Plan ({rb.strategy} · backup: {rb.backup_target})[/]")
+    for pre in rb.preconditions:
+        plan_lines.append(f"- [dim]Precondition:[/] {pre}")
+    for step in rb.steps:
+        plan_lines.append(f"- {step}")
+
+    if plan.uncertainties:
+        plan_lines.append("")
+        plan_lines.append("[bold yellow]Known Uncertainties[/]")
+        for unc in plan.uncertainties:
+            plan_lines.append(f"- {unc}")
+
+    out.print(
+        ui_panel(
+            "\n".join(plan_lines),
+            title="8 · Migration & Rollback Plan",
+            tone="info",
+        )
+    )
+
 
 
 def format_executive_summary_text(report: AuditReport) -> str:
@@ -386,6 +492,43 @@ def format_report_markdown(report: AuditReport) -> str:
         lines.extend(["## Reservations & Open Items", ""])
         for item in report.reservations:
             lines.append(f"- {item}")
+        lines.append("")
+
+    if report.migration_plan is not None:
+        mp = report.migration_plan
+        lines.extend(["## Migration & Rollback Plan", "", mp.summary, ""])
+        if mp.files_to_review:
+            lines.extend(
+                [
+                    "### Files to Review",
+                    "",
+                    "| File | Category | Reason | Suggested Action |",
+                    "|---|---|---|---|",
+                ]
+            )
+            for f_target in mp.files_to_review:
+                lines.append(
+                    f"| `{f_target.path}` | {f_target.category} | {f_target.reason} | {f_target.suggested_change} |"
+                )
+            lines.append("")
+        if mp.ordered_steps:
+            lines.extend(["### Migration Steps", ""])
+            for step in mp.ordered_steps:
+                lines.append(f"- {step}")
+            lines.append("")
+        if mp.validation_steps:
+            lines.extend(["### Validation Steps", ""])
+            for v_step in mp.validation_steps:
+                lines.append(f"- {v_step}")
+            lines.append("")
+        lines.extend(
+            [
+                f"### Rollback Plan (`{mp.rollback_plan.strategy}` — `{mp.rollback_plan.backup_target}`)",
+                "",
+            ]
+        )
+        for rb_step in mp.rollback_plan.steps:
+            lines.append(f"- {rb_step}")
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
