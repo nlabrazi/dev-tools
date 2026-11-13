@@ -4,6 +4,10 @@ from core.maintenance.detector import (
     inspect_git_state,
     inspect_renovate_config,
 )
+from core.maintenance.environments import (
+    build_environment_matrix,
+    collect_declared_versions,
+)
 from core.maintenance.models import (
     DRIFT_ACCEPTED,
     DRIFT_ALIGNED,
@@ -64,6 +68,8 @@ __all__ = [
     "STATUS_UNKNOWN",
     "StackComponent",
     "ask_maintenance_action",
+    "build_environment_matrix",
+    "collect_declared_versions",
     "detect_deployment_files",
     "detect_project_stacks",
     "inspect_git_state",

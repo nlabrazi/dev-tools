@@ -6,6 +6,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from core.maintenance import (
+    DRIFT_ACCEPTED,
+    DRIFT_ALIGNED,
+    DRIFT_PROBLEMATIC,
+    STATUS_UNKNOWN,
+    build_environment_matrix,
+    collect_declared_versions,
     detect_project_stacks,
     inspect_git_state,
     inspect_renovate_config,
@@ -135,6 +141,64 @@ class MaintenanceDetectorTests(unittest.TestCase):
             central_cfg = inspect_renovate_config(tmp_dir)
             self.assertTrue(central_cfg.extends_dev_platform)
             self.assertEqual(central_cfg.issues, [])
+
+
+class EnvironmentMatrixTests(unittest.TestCase):
+    def test_builds_matrix_with_aligned_python_and_accepted_postgres_difference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "Jenkinsfile").write_text(
+                "pipeline { agent { docker { image 'python:3.15.2' } } }\n",
+                encoding="utf-8",
+            )
+            wf_dir = root / ".github" / "workflows"
+            wf_dir.mkdir(parents=True)
+            (wf_dir / "tests.yml").write_text(
+                'services:\n  postgres:\n    image: postgres:18\nsteps:\n  - with:\n      python-version: "3.15.2"\n',
+                encoding="utf-8",
+            )
+            (root / "docker-compose.yml").write_text(
+                "services:\n  db:\n    image: postgres:16\n",
+                encoding="utf-8",
+            )
+
+            declared = collect_declared_versions(tmp_dir)
+            matrix = build_environment_matrix(tmp_dir, declared, production_overrides={"PostgreSQL": "16.13"})
+
+            by_comp = {row.component: row for row in matrix}
+            self.assertIn("Python", by_comp)
+            self.assertEqual(by_comp["Python"].github_actions, "3.15.2")
+            self.assertEqual(by_comp["Python"].jenkins, "3.15.2")
+            self.assertEqual(by_comp["Python"].production, STATUS_UNKNOWN)
+            self.assertEqual(by_comp["Python"].drift_status, DRIFT_ALIGNED)
+
+            self.assertIn("PostgreSQL", by_comp)
+            self.assertEqual(by_comp["PostgreSQL"].github_actions, "18")
+            self.assertEqual(by_comp["PostgreSQL"].docker, "16")
+            self.assertEqual(by_comp["PostgreSQL"].production, "16.13")
+            self.assertEqual(by_comp["PostgreSQL"].drift_status, DRIFT_ACCEPTED)
+
+    def test_detects_problematic_runtime_drift_and_resolves_dockerfile_args(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / ".nvmrc").write_text("22\n", encoding="utf-8")
+            (root / "Dockerfile").write_text(
+                "ARG NODE_IMAGE=node:24-bookworm-slim\nFROM ${NODE_IMAGE} AS base\n",
+                encoding="utf-8",
+            )
+            (root / "Jenkinsfile").write_text(
+                "pipeline { agent { docker { image 'node:24-bookworm' } } }\n",
+                encoding="utf-8",
+            )
+
+            declared = collect_declared_versions(tmp_dir)
+            matrix = build_environment_matrix(tmp_dir, declared)
+            node_row = next(r for r in matrix if r.component == "Node.js")
+
+            self.assertEqual(node_row.local, "22")
+            self.assertEqual(node_row.docker, "24")
+            self.assertEqual(node_row.jenkins, "24")
+            self.assertEqual(node_row.drift_status, DRIFT_PROBLEMATIC)
 
 
 if __name__ == "__main__":
