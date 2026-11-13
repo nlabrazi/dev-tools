@@ -116,6 +116,7 @@ from core.maintenance.workflow import (
     audit_repository,
     render_maintenance_menu,
     run_dependency_maintenance_for_repo,
+    run_guided_pr_bump_workflow,
 )
 
 __all__ = [
@@ -205,6 +206,7 @@ __all__ = [
     "render_validation_report",
     "resolve_journal_path",
     "run_dependency_maintenance_for_repo",
+    "run_guided_pr_bump_workflow",
     "run_maintenance_auto_commit",
     "run_maintenance_promote_to_base",
     "run_migration_validations",

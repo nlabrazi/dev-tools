@@ -14,21 +14,16 @@ from core.maintenance.git_ops import (
     merge_renovate_pr_to_staging,
     run_maintenance_auto_commit,
     run_maintenance_promote_to_base,
+    run_renovate_onboarding_workflow,
 )
 from core.maintenance.journal import (
     load_maintenance_journal,
     record_maintenance_step,
 )
-from core.maintenance.migrator import (
-    apply_migration_changes,
-    prepare_migration_changes,
-    verify_migration_git_preconditions,
-)
 from core.maintenance.models import (
     DRIFT_PROBLEMATIC,
     RISK_BLOCKED,
     RISK_BREAKING,
-    STATUS_UNKNOWN,
     AuditReport,
 )
 from core.maintenance.planner import generate_migration_plan
@@ -47,11 +42,10 @@ from core.maintenance.reporter import (
     render_audit_report,
     render_deployment_checklist,
     render_maintenance_journal,
-    render_migration_application_result,
     render_migration_plan,
     render_post_deploy_verification,
     render_production_environment_info,
-    render_proposed_changes_preview,
+    render_project_dashboard,
     render_renovate_pr_analysis,
     render_risk_assessments,
     render_validation_report,
@@ -61,7 +55,7 @@ from core.maintenance.validator import run_migration_validations
 from utils.console import ask_yes_no, ui_panel, ui_table
 
 console = Console()
-MAINTENANCE_MENU_CHOICES = ("1", "2", "3", "4", "5", "6", "7", "8", "q")
+MAINTENANCE_MENU_CHOICES = ("1", "2", "3", "4", "r", "q")
 
 
 def _compute_overall_status(
@@ -198,37 +192,102 @@ def audit_repository(
 def render_maintenance_menu(repo_name: str) -> None:
     table = ui_table(
         title=f"Dependency Maintenance · {repo_name}",
-        caption="Read-only audit, Ollama PR analysis, migration planning, and Git workflows.",
+        caption="Parcours guidé : Onboarding Renovate, Bump assisté par IA, Inspection détaillée & Vérification Prod.",
     )
     table.add_column("Key", justify="center", style="bold cyan", no_wrap=True)
     table.add_column("Action", style="bold white", no_wrap=True)
     table.add_column("Description", style="white")
-    table.add_row("1", "Full Audit & PR Analysis", "Audit stack, Renovate, version matrix, CI, open PRs, and migration plan.")
-    table.add_row("2", "Inspect Specific PR", "Analyze any PR number (open or merged) with Ollama for breaking changes.")
-    table.add_row("3", "Analyze Risks & Migration Plan", "Classify update risks, files to review, validation steps, and rollback plan.")
-    table.add_row("4", "Prepare Migration Changes", "Preview and apply controlled local migration changes on staging.")
-    table.add_row("5", "Run & Report Validations", "Run tests and report PASS, FAIL, SKIPPED, PENDING, and UNKNOWN statuses.")
-    table.add_row("6", "Git Workflows (Commit / Merge / Promote)", "Commit on staging, merge a Renovate PR into staging, or promote staging → base.")
-    table.add_row("7", "Production & Post-Deploy Checks", "Inspect production .venv/backups, deployment checklist, rollback, and Sentinel cron status.")
-    table.add_row("8", "Export Audit Report", "Save the audit and migration report as JSON and Markdown.")
-    table.add_row("q", "Back", "Return to the main menu.")
+    table.add_row(
+        "1",
+        "🚀 Déployer / Aligner Renovate",
+        "Configurer renovate.json (preset Dev Platform), aligner CI/deploy.sh, commiter sur staging & promouvoir.",
+    )
+    table.add_row(
+        "2",
+        "⚡ Traiter les PRs Renovate (Bump guidé)",
+        "Voir le verdict IA de chaque PR, merger les bumps sûrs sur staging, tester et promouvoir vers master.",
+    )
+    table.add_row(
+        "3",
+        "🔍 Inspecter en détail & Exporter",
+        "Analyser un n° de PR précis avec Ollama, afficher le plan complet, la matrice détaillée ou exporter (.md/.json).",
+    )
+    table.add_row(
+        "4",
+        "🩺 Checklist Production & Post-déploiement",
+        "Vérifier .venv symlink/backups, procédure de rollback et statut du cron via Sentinel.",
+    )
+    table.add_row("r", "🔄 Rafraîchir le Dashboard", "Relancer l'analyse rapide de l'état du projet et des PRs.")
+    table.add_row("q", "Retour", "Revenir au menu principal.")
     console.print(table)
 
 
 def ask_maintenance_action() -> str:
     return Prompt.ask(
-        "\n[bold white]Maintenance action[/]",
+        "\n[bold white]Action de maintenance[/]",
         choices=list(MAINTENANCE_MENU_CHOICES),
-        default="1",
+        default="q",
         show_choices=False,
     ).lower()
 
 
+def run_guided_pr_bump_workflow(
+    repo_path: str,
+    repo_name: str,
+    report: AuditReport,
+    *,
+    target_console: Console | None = None,
+) -> str:
+    out = target_console or console
+    if not report.open_prs:
+        out.print(
+            ui_panel(
+                "Aucune Pull Request Renovate ouverte sur ce dépôt actuellement.",
+                title="Traitement des PRs Renovate",
+                tone="success",
+                compact=True,
+            )
+        )
+        return "no-prs"
+
+    merged_or_simulated = 0
+    for pr in report.open_prs:
+        render_renovate_pr_analysis(pr, target_console=out)
+        merge_status = merge_renovate_pr_to_staging(
+            repo_path,
+            repo_name,
+            pr,
+            target_console=out,
+        )
+        if merge_status in {"merged", "dry-run"}:
+            merged_or_simulated += 1
+
+    if merged_or_simulated > 0:
+        if ask_yes_no("Exécuter les validations et tests locaux sur staging maintenant ?", default="y"):
+            val_report = run_migration_validations(report, execute_local_tests=True)
+            render_validation_report(val_report, target_console=out)
+        run_maintenance_promote_to_base(repo_path, repo_name, target_console=out)
+        return "processed"
+
+    return "reviewed"
+
+
 def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
-    last_report: AuditReport | None = None
     existing_journal = load_maintenance_journal(repo_path, repo_name)
     if existing_journal is not None and not existing_journal.is_complete:
         render_maintenance_journal(existing_journal, target_console=console)
+
+    with console.status(f"[bold cyan]Analyse de l'état de {repo_name} et des PRs Renovate...[/]", spinner="dots"):
+        last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=True)
+    render_project_dashboard(last_report, target_console=console)
+    record_maintenance_step(
+        repo_path,
+        repo_name,
+        "audit",
+        last_report.overall_status,
+        details=f"{len(last_report.open_prs)} open PR(s)",
+        pending_actions=last_report.reservations,
+    )
 
     while True:
         render_maintenance_menu(repo_name)
@@ -236,180 +295,118 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
         if choice == "q":
             break
 
-        if choice == "1":
-            with console.status(f"[bold cyan]Running read-only maintenance audit on {repo_name}...[/]", spinner="dots"):
+        if choice == "r":
+            with console.status(f"[bold cyan]Rafraîchissement du dashboard pour {repo_name}...[/]", spinner="dots"):
                 last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=True)
-            render_audit_report(last_report, target_console=console)
+            render_project_dashboard(last_report, target_console=console)
+            continue
+
+        if choice == "1":
+            status = run_renovate_onboarding_workflow(
+                repo_path,
+                repo_name,
+                last_report,
+                target_console=console,
+            )
             record_maintenance_step(
                 repo_path,
                 repo_name,
-                "audit",
-                last_report.overall_status,
-                details=f"{len(last_report.open_prs)} open PR(s)",
+                "onboarding",
+                status.upper(),
+                details="Onboarding & alignement Renovate",
                 pending_actions=last_report.reservations,
             )
-            if ask_yes_no("Export this audit report to JSON and Markdown?", default="n"):
-                status, paths = save_audit_report(last_report)
-                tone = "success" if status == "saved" else "info"
-                label = "Saved report files" if status == "saved" else "Dry-run simulation (no files written)"
+            continue
+
+        if choice == "2":
+            bump_status = run_guided_pr_bump_workflow(
+                repo_path,
+                repo_name,
+                last_report,
+                target_console=console,
+            )
+            record_maintenance_step(
+                repo_path,
+                repo_name,
+                "bump",
+                bump_status.upper(),
+                details=f"{len(last_report.open_prs)} PR(s) examinée(s)",
+                pending_actions=last_report.reservations,
+            )
+            continue
+
+        if choice == "3":
+            sub = Prompt.ask(
+                "[bold white]Inspection (1=Analyser un n° de PR précis, 2=Risques & Plan de migration, 3=Audit complet détaillé, 4=Exporter .md/.json, b=Retour)[/]",
+                choices=["1", "2", "3", "4", "b"],
+                default="2",
+                show_choices=False,
+            ).lower()
+            if sub == "1":
+                raw_pr = Prompt.ask("[bold white]Numéro de Pull Request à analyser[/]").strip().lstrip("#")
+                if not raw_pr.isdigit():
+                    console.print(
+                        ui_panel(
+                            f"Numéro de PR invalide '{raw_pr}'.",
+                            title="Entrée Invalide",
+                            tone="warning",
+                            compact=True,
+                        )
+                    )
+                    continue
+                pr_number = int(raw_pr)
+                pr_info = inspect_single_renovate_pr(
+                    repo_path,
+                    repo_name,
+                    pr_number,
+                    last_report.env_matrix,
+                    last_report.renovate_config,
+                )
+                if pr_info is None:
+                    console.print(
+                        ui_panel(
+                            f"Impossible de récupérer la PR #{pr_number} via GitHub CLI.",
+                            title="PR Introuvable",
+                            tone="danger",
+                            compact=True,
+                        )
+                    )
+                    continue
+                render_renovate_pr_analysis(pr_info, target_console=console)
+            elif sub == "2":
+                render_risk_assessments(last_report.risk_assessments, target_console=console)
+                if last_report.migration_plan is not None:
+                    render_migration_plan(last_report.migration_plan, target_console=console)
+            elif sub == "3":
+                render_audit_report(last_report, target_console=console)
+            elif sub == "4":
+                exp_status, paths = save_audit_report(last_report)
+                record_maintenance_step(
+                    repo_path,
+                    repo_name,
+                    "export",
+                    exp_status.upper(),
+                    details=", ".join(paths),
+                )
+                tone = "success" if exp_status == "saved" else "info"
+                label = "Fichiers exportés" if exp_status == "saved" else "Simulation dry-run (aucun fichier écrit)"
                 console.print(
                     ui_panel(
-                        f"{label}:\n" + "\n".join(f"- {p}" for p in paths),
-                        title="Report Export",
+                        f"{label} :\n" + "\n".join(f"- {p}" for p in paths),
+                        title="Export du Rapport",
                         tone=tone,
                         compact=True,
                     )
                 )
             continue
 
-        if choice == "2":
-            raw_pr = Prompt.ask("[bold white]Pull Request number to analyze[/]").strip().lstrip("#")
-            if not raw_pr.isdigit():
-                console.print(
-                    ui_panel(
-                        f"Invalid PR number '{raw_pr}'. Please enter a numeric PR ID.",
-                        title="Invalid Input",
-                        tone="warning",
-                        compact=True,
-                    )
-                )
-                continue
-            pr_number = int(raw_pr)
-            declared = collect_declared_versions(repo_path)
-            env_matrix = build_environment_matrix(repo_path, declared)
-            renovate_cfg = inspect_renovate_config(repo_path)
-            pr_info = inspect_single_renovate_pr(
-                repo_path,
-                repo_name,
-                pr_number,
-                env_matrix,
-                renovate_cfg,
-            )
-            if pr_info is None:
-                console.print(
-                    ui_panel(
-                        f"Could not fetch PR #{pr_number} via GitHub CLI.",
-                        title="PR Not Found",
-                        tone="danger",
-                        compact=True,
-                    )
-                )
-                continue
-            render_renovate_pr_analysis(pr_info, target_console=console)
-            continue
-
-        if choice == "3":
-            if last_report is None:
-                with console.status(f"[bold cyan]Analyzing risks and preparing migration plan for {repo_name}...[/]", spinner="dots"):
-                    last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=True)
-            render_risk_assessments(last_report.risk_assessments, target_console=console)
-            if last_report.migration_plan is not None:
-                render_migration_plan(last_report.migration_plan, target_console=console)
-            record_maintenance_step(
-                repo_path,
-                repo_name,
-                "plan",
-                "PLANNED",
-                details=f"{len(last_report.risk_assessments)} risk item(s) analyzed",
-                pending_actions=last_report.reservations,
-            )
-            continue
-
         if choice == "4":
-            if last_report is None:
-                with console.status(f"[bold cyan]Preparing migration changes for {repo_name}...[/]", spinner="dots"):
-                    last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=False)
-            ok, issues = verify_migration_git_preconditions(repo_path)
-            if not ok:
-                console.print(
-                    ui_panel(
-                        "\n".join(f"- {msg}" for msg in issues),
-                        title="Git Precondition Check Failed",
-                        tone="danger",
-                        compact=True,
-                    )
-                )
-                continue
-            proposals = prepare_migration_changes(last_report)
-            render_proposed_changes_preview(proposals, target_console=console)
-            if proposals and ask_yes_no("Apply these controlled migration changes locally?", default="n"):
-                app_result = apply_migration_changes(repo_path, proposals)
-                render_migration_application_result(app_result, target_console=console)
-                record_maintenance_step(
-                    repo_path,
-                    repo_name,
-                    "prepare_changes",
-                    app_result.status.upper(),
-                    details=", ".join(app_result.applied_files),
-                    pending_actions=last_report.reservations,
-                )
-            continue
-
-        if choice == "5":
-            if last_report is None:
-                with console.status(f"[bold cyan]Running audit on {repo_name} before validations...[/]", spinner="dots"):
-                    last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=False)
-            run_tests = ask_yes_no("Execute local unit/integration tests now?", default="y")
-            with console.status(f"[bold cyan]Running migration validations on {repo_name}...[/]", spinner="dots"):
-                val_report = run_migration_validations(last_report, execute_local_tests=run_tests)
-            render_validation_report(val_report, target_console=console)
-            record_maintenance_step(
-                repo_path,
-                repo_name,
-                "validate",
-                val_report.overall_status,
-                details=f"PASS={val_report.counts_by_status.get('PASS', 0)}, SKIPPED={val_report.counts_by_status.get('SKIPPED', 0)}",
-                pending_actions=val_report.reservations,
-            )
-            continue
-
-        if choice == "6":
-            if last_report is None:
-                with console.status(f"[bold cyan]Inspecting repository state for {repo_name}...[/]", spinner="dots"):
-                    last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=False)
-            git_action = Prompt.ask(
-                "[bold white]Git workflow action (1=Auto-Commit on staging, 2=Merge Renovate PR to staging, 3=Promote staging → base, b=Back)[/]",
-                choices=["1", "2", "3", "b"],
-                default="b",
-                show_choices=False,
-            ).lower()
-            if git_action == "1":
-                run_maintenance_auto_commit(repo_path, repo_name, target_console=console)
-                record_maintenance_step(repo_path, repo_name, "git_workflow", "AUTO_COMMIT", details="Auto-commit on staging")
-            elif git_action == "2":
-                if not last_report.open_prs:
-                    console.print(
-                        ui_panel(
-                            "No open Renovate pull requests found for this repository.",
-                            title="Merge Renovate PR",
-                            tone="info",
-                            compact=True,
-                        )
-                    )
-                else:
-                    for pr in last_report.open_prs:
-                        merge_renovate_pr_to_staging(
-                            repo_path,
-                            repo_name,
-                            pr,
-                            target_console=console,
-                        )
-                    record_maintenance_step(repo_path, repo_name, "git_workflow", "RENOVATE_PR_MERGE", details="Processed open Renovate PR(s)")
-            elif git_action == "3":
-                run_maintenance_promote_to_base(repo_path, repo_name, target_console=console)
-                record_maintenance_step(repo_path, repo_name, "git_workflow", "PROMOTE_TO_BASE", details="Promoted staging to base branch")
-            continue
-
-        if choice == "7":
-            if last_report is None:
-                with console.status(f"[bold cyan]Inspecting repository and production readiness for {repo_name}...[/]", spinner="dots"):
-                    last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=False)
             prod_info = last_report.production_info or inspect_production_environment(repo_name)
             render_production_environment_info(prod_info, target_console=console)
             checklist = prepare_deployment_and_rollback(last_report, prod_info)
             render_deployment_checklist(checklist, target_console=console)
             sentinel_ok = ask_yes_no(
-                "Has a real scheduled cron execution been verified via Sentinel after deployment?",
+                "Une exécution réelle du cron a-t-elle été confirmée au vert dans Sentinel après déploiement ?",
                 default="n",
             )
             post_report = verify_post_deployment(
@@ -426,28 +423,4 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
                 details=f"Scheduled jobs: {post_report.scheduled_jobs_status}",
                 pending_actions=post_report.notes,
                 is_complete=sentinel_ok and checklist.ready_to_deploy,
-            )
-            continue
-
-        if choice == "8":
-            if last_report is None:
-                with console.status(f"[bold cyan]Running audit on {repo_name} before export...[/]", spinner="dots"):
-                    last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=True)
-            status, paths = save_audit_report(last_report)
-            record_maintenance_step(
-                repo_path,
-                repo_name,
-                "export",
-                status.upper(),
-                details=", ".join(paths),
-            )
-            tone = "success" if status == "saved" else "info"
-            label = "Saved report files" if status == "saved" else "Dry-run simulation (no files written)"
-            console.print(
-                ui_panel(
-                    f"{label}:\n" + "\n".join(f"- {p}" for p in paths),
-                    title="Report Export",
-                    tone=tone,
-                    compact=True,
-                )
             )

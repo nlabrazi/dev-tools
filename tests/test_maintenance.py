@@ -60,6 +60,7 @@ from core.maintenance import (
     render_proposed_changes_preview,
     render_risk_assessments,
     render_validation_report,
+    run_guided_pr_bump_workflow,
     run_maintenance_auto_commit,
     run_maintenance_promote_to_base,
     run_migration_validations,
@@ -1090,8 +1091,8 @@ class MaintenanceSessionResumeTests(unittest.TestCase):
             )
             self.assertEqual(save_status, "saved")
             rec_choice, rec_desc = get_resume_recommendation(journal1)
-            self.assertEqual(rec_choice, "4")
-            self.assertIn("migration changes", rec_desc)
+            self.assertEqual(rec_choice, "1")
+            self.assertIn("Renovate", rec_desc)
 
             _, journal2 = record_maintenance_step(
                 tmp_dir,
@@ -1106,7 +1107,7 @@ class MaintenanceSessionResumeTests(unittest.TestCase):
             self.assertEqual(loaded.current_stage, "prepare_changes")
             self.assertEqual(len(loaded.completed_steps), 2)
             rec_choice2, _ = get_resume_recommendation(loaded)
-            self.assertEqual(rec_choice2, "5")
+            self.assertEqual(rec_choice2, "2")
 
             buffer = io.StringIO()
             test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
@@ -1114,7 +1115,29 @@ class MaintenanceSessionResumeTests(unittest.TestCase):
             rendered = buffer.getvalue()
             self.assertIn("Resume Guide", rendered)
             self.assertIn("prepare_changes", rendered)
-            self.assertIn("menu [5]", rendered)
+            self.assertIn("menu [2]", rendered)
+
+    def test_guided_pr_bump_workflow_merges_validates_and_promotes(self) -> None:
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "renovate.json").write_text(
+                json.dumps({"extends": ["github>nlabrazi/dev-platform//configs/renovate/base"]}),
+                encoding="utf-8",
+            )
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch("core.maintenance.detector.git_output", return_value="staging"), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", return_value=empty_gh):
+                report = audit_repository(tmp_dir, "sjvtdm", include_ollama_analysis=False)
+
+            self.assertEqual(
+                run_guided_pr_bump_workflow(tmp_dir, "sjvtdm", report, target_console=test_console),
+                "no-prs",
+            )
 
 
 if __name__ == "__main__":
