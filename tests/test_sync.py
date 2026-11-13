@@ -2,10 +2,18 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from core.sync import describe_sync_plan, ensure_local_branch_exists, pull_ff_only, sync_default_branch
+from core.sync import describe_sync_plan, ensure_local_branch_exists, fetch, pull_ff_only, sync_default_branch
 
 
 class SyncDryRunTests(unittest.TestCase):
+    def test_fetch_returns_true_without_git_fetch_in_dry_run(self) -> None:
+        with patch("core.sync.is_dry_run", return_value=True), patch("core.sync.git_command") as git_command, patch(
+            "core.sync.console.print"
+        ):
+            ok = fetch("/tmp/repo", "repo")
+
+        self.assertTrue(ok)
+        git_command.assert_not_called()
     def test_ensure_local_branch_exists_returns_dry_run_when_branch_is_missing(self) -> None:
         missing_branch = subprocess.CompletedProcess(
             args=["show-ref", "--verify", "--quiet", "refs/heads/main"],

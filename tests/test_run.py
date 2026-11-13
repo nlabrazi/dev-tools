@@ -71,6 +71,7 @@ class RunConfigTests(unittest.TestCase):
         self.assertIn("Dev Tools Control Deck", output)
         self.assertIn("Review Code", output)
         self.assertIn("Comment Code", output)
+        self.assertIn("Dependency Maintenance", output)
         self.assertIn("optionally apply", output)
         self.assertNotIn("Status", output)
         self.assertNotIn("Ready", output)
@@ -483,6 +484,41 @@ class RunConfigTests(unittest.TestCase):
 
         self.assertTrue(should_continue)
         run_comment_workflow.assert_called_once_with(["/tmp/root"])
+
+    def test_run_selected_action_dispatches_dependency_maintenance_workflow(self) -> None:
+        with patch(
+            "run.ask_action_repository",
+            return_value=("sjvtdm", "/tmp/root/sjvtdm"),
+        ) as ask_repo, patch(
+            "core.maintenance.run_dependency_maintenance_for_repo"
+        ) as run_maintenance, patch("run.section_title"):
+            should_continue = run.run_selected_action(
+                "7",
+                root_dirs=["/tmp/root"],
+                head_branch="staging",
+                base_branch_strategy="strategy",
+            )
+
+        self.assertTrue(should_continue)
+        ask_repo.assert_called_once_with(["/tmp/root"], "Dependency Maintenance")
+        run_maintenance.assert_called_once_with("sjvtdm", "/tmp/root/sjvtdm")
+
+    def test_dependency_maintenance_returns_without_action_when_selection_is_cancelled(self) -> None:
+        with patch(
+            "run.ask_action_repository",
+            return_value=None,
+        ), patch(
+            "core.maintenance.run_dependency_maintenance_for_repo"
+        ) as run_maintenance, patch("run.section_title"):
+            should_continue = run.run_selected_action(
+                "7",
+                root_dirs=["/tmp/root"],
+                head_branch="staging",
+                base_branch_strategy="strategy",
+            )
+
+        self.assertTrue(should_continue)
+        run_maintenance.assert_not_called()
 
     def test_run_selected_action_quit_stops_menu_loop(self) -> None:
         should_continue = run.run_selected_action(

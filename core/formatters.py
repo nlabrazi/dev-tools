@@ -17,6 +17,9 @@ def _normalize_payload(parsed: Dict[str, Any]) -> Dict[str, Any]:
     if "mr" not in parsed:
         if any(k in parsed for k in ("title", "description")):
             return {"mr": parsed}
+    if "pr_analysis" not in parsed:
+        if any(k in parsed for k in ("risk_level", "breaking_change", "breaking_summary", "verdict")):
+            return {"pr_analysis": parsed}
     return parsed
 
 

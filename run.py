@@ -10,7 +10,7 @@ from rich.prompt import Prompt
 from utils.console import ui_panel, ui_table
 
 console = Console()
-MENU_CHOICES = ("1", "2", "3", "4", "5", "6", "q")
+MENU_CHOICES = ("1", "2", "3", "4", "5", "6", "7", "q")
 REVIEW_TARGET_CHOICES = ("1", "2", "3", "4", "5", "q")
 
 
@@ -150,6 +150,7 @@ def render_main_menu(
     table.add_row("4", "Comment Code", "Preview and optionally apply source comments.")
     table.add_row("5", "Changelog", "Update changelogs from Conventional Commits.")
     table.add_row("6", "Sync", "Fast-forward local base branches.")
+    table.add_row("7", "Dependency Maintenance", "Audit stacks, Renovate PRs with Ollama, and runtime alignment.")
     table.add_row("q", "Quit", "Return to your shell.")
 
     console.print(table)
@@ -621,6 +622,15 @@ def run_selected_action(
         section_title("Sync Base Branches", "⏳")
         console.print(ui_panel(sync.describe_sync_plan(), title="Sync Plan", compact=True))
         sync.main(root_dirs)
+        return True
+
+    if choice == "7":
+        from core.maintenance import run_dependency_maintenance_for_repo
+
+        section_title("Dependency Maintenance", "🛡️")
+        selected_repo = ask_action_repository(root_dirs, "Dependency Maintenance")
+        if selected_repo is not None:
+            run_dependency_maintenance_for_repo(selected_repo[0], selected_repo[1])
         return True
 
     return True

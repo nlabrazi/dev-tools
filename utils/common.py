@@ -19,7 +19,6 @@ _FAILURE_DETAILS_MAX_CHARS = 1600
 _SAFE_PREFIXES: list[list[str]] = [
     ["git", "status"],
     ["git", "diff"],
-    ["git", "fetch"],
     ["git", "log"],
     ["git", "rev-parse"],
     ["git", "merge-base"],
@@ -38,6 +37,7 @@ _SAFE_PREFIXES: list[list[str]] = [
 
 # Commands that mutate state (must be blocked in dry-run)
 _BLOCK_PREFIXES: list[list[str]] = [
+    ["git", "fetch"],
     ["git", "add"],
     ["git", "commit"],
     ["git", "push"],

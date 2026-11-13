@@ -1,0 +1,1051 @@
+import io
+import json
+import os
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from rich.console import Console
+
+from core.maintenance import (
+    DRIFT_ACCEPTED,
+    DRIFT_ALIGNED,
+    DRIFT_PROBLEMATIC,
+    RISK_BLOCKED,
+    RISK_BREAKING,
+    RISK_LOW,
+    RISK_REVIEW,
+    STATUS_FAIL,
+    STATUS_PASS,
+    STATUS_SKIPPED,
+    STATUS_UNKNOWN,
+    RenovateConfigInfo,
+    RenovatePRInfo,
+    RenovateUpdateItem,
+    analyze_renovate_pr,
+    apply_migration_changes,
+    audit_repository,
+    build_environment_matrix,
+    classify_repository_update_risks,
+    collect_declared_versions,
+    detect_project_stacks,
+    extract_release_notes_signals,
+    format_report_json,
+    format_report_markdown,
+    generate_migration_plan,
+    get_resume_recommendation,
+    inspect_dependency_dashboard,
+    inspect_git_state,
+    inspect_production_environment,
+    inspect_renovate_config,
+    load_maintenance_journal,
+    merge_renovate_pr_to_staging,
+    parse_dashboard_pending_update,
+    parse_python_test_output,
+    parse_renovate_pr_body,
+    prepare_deployment_and_rollback,
+    prepare_migration_changes,
+    record_maintenance_step,
+    render_audit_report,
+    render_deployment_checklist,
+    render_maintenance_journal,
+    render_migration_application_result,
+    render_migration_plan,
+    render_post_deploy_verification,
+    render_production_environment_info,
+    render_proposed_changes_preview,
+    render_risk_assessments,
+    render_validation_report,
+    run_maintenance_auto_commit,
+    run_maintenance_promote_to_base,
+    run_migration_validations,
+    save_audit_report,
+    summarize_risk_assessments,
+    verify_migration_git_preconditions,
+    verify_post_deployment,
+)
+from core.ollama import OllamaError
+from utils.common import set_dry_run
+
+
+class MaintenanceDetectorTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_dry_run(False)
+
+    def test_detects_python_unpinned_dependencies_and_pip_less_venv_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "requirements.txt").write_text(
+                "feedparser\nrequests==2.32.3\n# comment\n-r other.txt\npsycopg2-binary>=2.9\n",
+                encoding="utf-8",
+            )
+            venv_target = root / ".venv-315"
+            (venv_target / "bin").mkdir(parents=True)
+            (venv_target / "bin" / "python").write_text("", encoding="utf-8")
+            os.symlink(".venv-315", root / ".venv")
+
+            (root / "deploy.sh").write_text("#!/bin/bash\npip install -r requirements.txt\n", encoding="utf-8")
+
+            with patch(
+                "core.maintenance.detector.git_output",
+                side_effect=[
+                    "staging",
+                    " M requirements.txt\n?? .venv\n?? .venv-315/\n",
+                    "0\t2",
+                ],
+            ), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved from origin/HEAD"),
+            ):
+                git_state = inspect_git_state(tmp_dir)
+                stacks, deploy_files, reservations = detect_project_stacks(tmp_dir, "sjvtdm", git_state=git_state)
+
+            self.assertFalse(git_state.is_clean)
+            self.assertTrue(git_state.venv_exists)
+            self.assertTrue(git_state.venv_is_symlink)
+            self.assertEqual(git_state.venv_target, ".venv-315")
+            self.assertFalse(git_state.venv_has_pip)
+            self.assertEqual(git_state.ahead_of_base, 2)
+            self.assertEqual(git_state.behind_base, 0)
+            self.assertIn(".venv", git_state.untracked_venv_entries)
+
+            py_stack = next(s for s in stacks if s.ecosystem == "python")
+            self.assertEqual(py_stack.pinned_count, 1)
+            self.assertEqual(py_stack.unpinned_dependencies, ["feedparser", "psycopg2-binary"])
+            self.assertIn("deploy.sh", deploy_files)
+            self.assertTrue(any("Unpinned Python dependencies" in r for r in reservations))
+            self.assertTrue(any("no 'pip' binary" in r or "no pip binary" in r for r in reservations))
+            self.assertTrue(any(".git/info/exclude" in r for r in reservations))
+
+    def test_detects_multi_stack_python_node_ruby_and_docker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "api").mkdir()
+            (root / "ui").mkdir()
+            (root / "api" / "requirements.txt").write_text("fastapi==0.115.0\n", encoding="utf-8")
+            (root / "ui" / "package.json").write_text(
+                json.dumps(
+                    {
+                        "dependencies": {"nuxt": "^4.4.2", "vue": "^3.5.0"},
+                        "devDependencies": {"@playwright/test": "^1.63.0"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / "ui" / "package-lock.json").write_text("{}", encoding="utf-8")
+            (root / "Gemfile").write_text("source 'https://rubygems.org'\ngem 'rails'\n", encoding="utf-8")
+            (root / "Dockerfile").write_text("FROM ruby:3.4-slim\n", encoding="utf-8")
+            (root / "Jenkinsfile").write_text("pipeline {}", encoding="utf-8")
+            wf_dir = root / ".github" / "workflows"
+            wf_dir.mkdir(parents=True)
+            (wf_dir / "ci.yml").write_text("name: CI\n", encoding="utf-8")
+
+            with patch("core.maintenance.detector.git_output", return_value=""), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("main", "resolved"),
+            ):
+                stacks, _, _ = detect_project_stacks(tmp_dir, "multi-app")
+
+            ecosystems = [s.ecosystem for s in stacks]
+            self.assertIn("python", ecosystems)
+            self.assertIn("nodejs", ecosystems)
+            self.assertIn("ruby", ecosystems)
+            self.assertIn("docker", ecosystems)
+            self.assertIn("ci", ecosystems)
+            node_stack = next(s for s in stacks if s.ecosystem == "nodejs")
+            self.assertIn("Nuxt", node_stack.frameworks)
+            self.assertIn("Playwright", node_stack.frameworks)
+
+    def test_inspect_renovate_config_handles_missing_preset_and_private_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            missing_cfg = inspect_renovate_config(tmp_dir)
+            self.assertFalse(missing_cfg.exists)
+            self.assertTrue(any("Missing renovate.json" in i for i in missing_cfg.issues))
+
+            (root / ".npmrc").write_text("@nlabrazi:registry=https://npm.pkg.github.com\n", encoding="utf-8")
+            (root / "renovate.json").write_text(
+                json.dumps(
+                    {
+                        "extends": ["config:recommended"],
+                        "prConcurrentLimit": 5,
+                        "automerge": False,
+                        "npmrc": "@nlabrazi:registry=https://npm.pkg.github.com/",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            custom_cfg = inspect_renovate_config(tmp_dir)
+            self.assertTrue(custom_cfg.exists)
+            self.assertTrue(custom_cfg.valid_json)
+            self.assertFalse(custom_cfg.extends_dev_platform)
+            self.assertTrue(custom_cfg.has_private_registry)
+            self.assertEqual(custom_cfg.pr_concurrent_limit, 5)
+            self.assertTrue(any("does not extend central preset" in i for i in custom_cfg.issues))
+
+            (root / "renovate.json").write_text(
+                json.dumps({"extends": ["github>nlabrazi/dev-platform//configs/renovate/base"]}),
+                encoding="utf-8",
+            )
+            central_cfg = inspect_renovate_config(tmp_dir)
+            self.assertTrue(central_cfg.extends_dev_platform)
+            self.assertEqual(central_cfg.issues, [])
+
+
+class EnvironmentMatrixTests(unittest.TestCase):
+    def test_builds_matrix_with_aligned_python_and_accepted_postgres_difference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "Jenkinsfile").write_text(
+                "pipeline { agent { docker { image 'python:3.15.2' } } }\n",
+                encoding="utf-8",
+            )
+            wf_dir = root / ".github" / "workflows"
+            wf_dir.mkdir(parents=True)
+            (wf_dir / "tests.yml").write_text(
+                'services:\n  postgres:\n    image: postgres:18\nsteps:\n  - with:\n      python-version: "3.15.2"\n',
+                encoding="utf-8",
+            )
+            (root / "docker-compose.yml").write_text(
+                "services:\n  db:\n    image: postgres:16\n",
+                encoding="utf-8",
+            )
+
+            declared = collect_declared_versions(tmp_dir)
+            matrix = build_environment_matrix(tmp_dir, declared, production_overrides={"PostgreSQL": "16.13"})
+
+            by_comp = {row.component: row for row in matrix}
+            self.assertIn("Python", by_comp)
+            self.assertEqual(by_comp["Python"].github_actions, "3.15.2")
+            self.assertEqual(by_comp["Python"].jenkins, "3.15.2")
+            self.assertEqual(by_comp["Python"].production, STATUS_UNKNOWN)
+            self.assertEqual(by_comp["Python"].drift_status, DRIFT_ALIGNED)
+
+            self.assertIn("PostgreSQL", by_comp)
+            self.assertEqual(by_comp["PostgreSQL"].github_actions, "18")
+            self.assertEqual(by_comp["PostgreSQL"].docker, "16")
+            self.assertEqual(by_comp["PostgreSQL"].production, "16.13")
+            self.assertEqual(by_comp["PostgreSQL"].drift_status, DRIFT_ACCEPTED)
+
+    def test_detects_problematic_runtime_drift_and_resolves_dockerfile_args(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / ".nvmrc").write_text("22\n", encoding="utf-8")
+            (root / "Dockerfile").write_text(
+                "ARG NODE_IMAGE=node:24-bookworm-slim\nFROM ${NODE_IMAGE} AS base\n",
+                encoding="utf-8",
+            )
+            (root / "Jenkinsfile").write_text(
+                "pipeline { agent { docker { image 'node:24-bookworm' } } }\n",
+                encoding="utf-8",
+            )
+
+            declared = collect_declared_versions(tmp_dir)
+            matrix = build_environment_matrix(tmp_dir, declared)
+            node_row = next(r for r in matrix if r.component == "Node.js")
+
+            self.assertEqual(node_row.local, "22")
+            self.assertEqual(node_row.docker, "24")
+            self.assertEqual(node_row.jenkins, "24")
+            self.assertEqual(node_row.drift_status, DRIFT_PROBLEMATIC)
+
+
+class RenovateAndOllamaPRTests(unittest.TestCase):
+    def test_parse_renovate_pr_body_extracts_updates_warnings_and_breaking_notes(self) -> None:
+        body = (
+            "This PR contains the following updates:\n\n"
+            "| Package | Change | Age | Confidence |\n"
+            "|---|---|---|---|\n"
+            "| [@playwright/test](https://playwright.dev) | [`1.63.0` → `1.65.0`](https://example.com) | age | conf |\n\n"
+            "> [!WARNING]\n> Some dependencies could not be looked up.\n\n"
+            "### Release Notes\n\n"
+            "#### Breaking changes ⚠️\n- `screen` property is now forwarded.\n\n"
+            "### Configuration\n"
+        )
+        updates, has_rn, has_warn, excerpt = parse_renovate_pr_body(
+            "chore(deps): update dependency @playwright/test to v1.65.0",
+            body,
+        )
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0].package, "@playwright/test")
+        self.assertEqual(updates[0].from_version, "1.63.0")
+        self.assertEqual(updates[0].to_version, "1.65.0")
+        self.assertEqual(updates[0].update_type, "minor")
+        self.assertTrue(has_rn)
+        self.assertTrue(has_warn)
+        self.assertIn("Breaking changes", excerpt)
+
+    def test_analyze_renovate_pr_uses_ollama_and_preserves_deterministic_drift_impacts(self) -> None:
+        pr = RenovatePRInfo(
+            number=23,
+            title="chore(deps): update dependency @playwright/test to v1.65.0",
+            head_branch="renovate/playwright-monorepo",
+            base_branch="staging",
+            ci_status=STATUS_PASS,
+            merge_state="CLEAN",
+            changed_files=["package-lock.json"],
+            updates=[
+                RenovateUpdateItem(
+                    package="@playwright/test",
+                    update_type="minor",
+                    from_version="1.63.0",
+                    to_version="1.65.0",
+                    raw_change="1.63.0 -> 1.65.0",
+                )
+            ],
+            has_release_notes=True,
+            has_renovate_warning=True,
+            release_notes_excerpt="### Release Notes\n#### Breaking changes ⚠️\n- screen forwarded",
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "Jenkinsfile").write_text(
+                "pipeline { agent { docker { image 'mcr.microsoft.com/playwright:v1.63.0-noble' } } }\n",
+                encoding="utf-8",
+            )
+            env_matrix = build_environment_matrix(tmp_dir, collect_declared_versions(tmp_dir))
+            renovate_cfg = RenovateConfigInfo(exists=True, valid_json=True, extends_dev_platform=True)
+
+            ollama_json = json.dumps(
+                {
+                    "pr_analysis": {
+                        "risk_level": "LOW RISK",
+                        "breaking_change": True,
+                        "breaking_summary": "Playwright 1.64 introduit un changement sur window.screen.",
+                        "summary": "Mise à jour de @playwright/test de 1.63.0 vers 1.65.0.",
+                        "key_changes": ["Support de Bun", "Changement sur window.screen"],
+                        "project_impacts": ["Impact sur les tests E2E."],
+                        "checks_before_merge": ["Vérifier la suite E2E."],
+                        "verdict": "Adapter Jenkinsfile avant de merger.",
+                    }
+                }
+            )
+
+            with patch("core.maintenance.renovate.is_ollama_enabled", return_value=True), patch(
+                "core.maintenance.renovate.ensure_repo_context_allowed"
+            ), patch("core.maintenance.renovate.chat_json", return_value=ollama_json):
+                analysis = analyze_renovate_pr("riftvision", tmp_dir, pr, env_matrix, renovate_cfg)
+
+        self.assertEqual(analysis.source, "ollama")
+        self.assertEqual(analysis.risk_level, RISK_BREAKING)
+        self.assertTrue(analysis.breaking_change)
+        self.assertIn("Playwright 1.64", analysis.breaking_summary)
+        self.assertTrue(any("1.63.0" in imp for imp in analysis.project_impacts))
+
+    def test_analyze_renovate_pr_falls_back_to_heuristic_when_ollama_fails(self) -> None:
+        pr = RenovatePRInfo(
+            number=56,
+            title="chore(deps): update postgres docker tag to v18",
+            head_branch="renovate/postgres-18.x",
+            base_branch="staging",
+            ci_status=STATUS_FAIL,
+            merge_state="UNSTABLE",
+            changed_files=[".github/workflows/tests.yml"],
+            updates=[
+                RenovateUpdateItem(
+                    package="postgres",
+                    update_type="major",
+                    from_version="14",
+                    to_version="18",
+                    raw_change="14 -> 18",
+                )
+            ],
+            has_release_notes=False,
+            has_renovate_warning=False,
+            release_notes_excerpt="",
+        )
+        renovate_cfg = RenovateConfigInfo(exists=True, valid_json=True, extends_dev_platform=True)
+
+        with patch("core.maintenance.renovate.is_ollama_enabled", return_value=True), patch(
+            "core.maintenance.renovate.ensure_repo_context_allowed"
+        ), patch("core.maintenance.renovate.chat_json", side_effect=OllamaError("connection refused")), patch(
+            "builtins.print"
+        ):
+            analysis = analyze_renovate_pr("sjvtdm", "/tmp/repo", pr, [], renovate_cfg)
+
+        self.assertEqual(analysis.source, "heuristic")
+        self.assertEqual(analysis.risk_level, RISK_BLOCKED)
+        self.assertTrue(any("CI" in chk for chk in analysis.checks_before_merge))
+
+    def test_inspect_dependency_dashboard_parses_clean_and_pending_states(self) -> None:
+        dashboard_payload = [
+            {
+                "number": 52,
+                "title": "Dependency Dashboard",
+                "state": "OPEN",
+                "body": (
+                    "This repository currently has no open or pending branches.\n"
+                    "<details><summary>github-actions (1)</summary></details>\n"
+                    "<details><summary>pip_requirements (1)</summary></details>\n"
+                    "- [ ] <!-- manual job -->Check this box\n"
+                ),
+            }
+        ]
+        completed = subprocess.CompletedProcess(
+            args=["gh", "issue", "list"],
+            returncode=0,
+            stdout=json.dumps(dashboard_payload),
+            stderr="",
+        )
+        with patch("core.maintenance.renovate.run_command", return_value=completed):
+            info = inspect_dependency_dashboard("/tmp/repo")
+
+        self.assertEqual(info.status, STATUS_PASS)
+        self.assertEqual(info.issue_number, 52)
+        self.assertTrue(info.no_open_or_pending)
+        self.assertEqual(info.open_items, [])
+        self.assertEqual(info.detected_managers, ["github-actions", "pip_requirements"])
+
+
+class AuditAndExportDryRunTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_dry_run(False)
+
+    def test_save_audit_report_respects_dry_run_and_writes_files_in_prod(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "renovate.json").write_text(
+                json.dumps({"extends": ["github>nlabrazi/dev-platform//configs/renovate/base"]}),
+                encoding="utf-8",
+            )
+            (root / "Jenkinsfile").write_text(
+                "pipeline { agent { docker { image 'python:3.15.2' } } }\n",
+                encoding="utf-8",
+            )
+
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch("core.maintenance.detector.git_output", return_value="staging"), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", return_value=empty_gh):
+                report = audit_repository(tmp_dir, "demo", include_ollama_analysis=False)
+
+            set_dry_run(True)
+            status_dry, paths_dry = save_audit_report(report, output_dir=tmp_dir)
+            self.assertEqual(status_dry, "dry-run")
+            for p in paths_dry:
+                self.assertFalse(Path(p).exists())
+
+            set_dry_run(False)
+            status_prod, paths_prod = save_audit_report(report, output_dir=tmp_dir)
+            self.assertEqual(status_prod, "saved")
+            for p in paths_prod:
+                self.assertTrue(Path(p).is_file())
+
+            parsed_json = json.loads(format_report_json(report))
+            self.assertEqual(parsed_json["repo_name"], "demo")
+            md_text = format_report_markdown(report)
+            self.assertIn("# Dependency Maintenance Audit — `demo`", md_text)
+
+            buffer = io.StringIO()
+            test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+            render_audit_report(report, target_console=test_console)
+            rendered = buffer.getvalue()
+            self.assertIn("Environment Version Matrix", rendered)
+            self.assertIn("Final Maintenance Summary", rendered)
+
+
+class UpdateRiskClassificationTests(unittest.TestCase):
+    def test_extracts_release_notes_signals_and_parses_dashboard_pending_items(self) -> None:
+        signals_empty = extract_release_notes_signals("")
+        self.assertFalse(signals_empty["has_breaking_marker"])
+        self.assertTrue(signals_empty["uncertainties"])
+
+        notes = (
+            "### Release Notes\n"
+            "#### Breaking changes ⚠️\n"
+            "- Requires Node.js >= 20.0.0\n"
+            "- Deprecated oldConfig option\n"
+        )
+        signals = extract_release_notes_signals(notes)
+        self.assertTrue(signals["has_breaking_marker"])
+        self.assertTrue(any("Node.js" in c for c in signals["runtime_constraints"]))
+        self.assertTrue(any("Deprecated" in d for d in signals["deprecation_lines"]))
+
+        pkg, from_v, to_v, u_type = parse_dashboard_pending_update(
+            "chore(deps): update dependency @playwright/test from v1.63.0 to v1.65.0"
+        )
+        self.assertEqual(pkg, "@playwright/test")
+        self.assertEqual(from_v, "1.63.0")
+        self.assertEqual(to_v, "1.65.0")
+        self.assertEqual(u_type, "minor")
+
+    def test_classifies_risks_with_sources_uncertainties_and_accepted_postgres_diff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "requirements.txt").write_text("feedparser\n", encoding="utf-8")
+            (root / "Jenkinsfile").write_text(
+                "pipeline { agent { docker { image 'python:3.11' } } }\n",
+                encoding="utf-8",
+            )
+            wf_dir = root / ".github" / "workflows"
+            wf_dir.mkdir(parents=True)
+            (wf_dir / "tests.yml").write_text(
+                'services:\n  postgres:\n    image: postgres:18\nsteps:\n  - with:\n      python-version: "3.15.2"\n',
+                encoding="utf-8",
+            )
+            (root / "docker-compose.yml").write_text(
+                "services:\n  db:\n    image: postgres:16\n",
+                encoding="utf-8",
+            )
+            venv_target = root / ".venv-315"
+            (venv_target / "bin").mkdir(parents=True)
+            (venv_target / "bin" / "python").write_text("", encoding="utf-8")
+            os.symlink(".venv-315", root / ".venv")
+            (root / "deploy.sh").write_text("#!/bin/bash\npip install -r requirements.txt\n", encoding="utf-8")
+
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch("core.maintenance.detector.git_output", return_value="staging"), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", return_value=empty_gh):
+                report = audit_repository(tmp_dir, "sjvtdm", include_ollama_analysis=False)
+
+            assessments = classify_repository_update_risks(report)
+            summary = summarize_risk_assessments(assessments)
+
+            self.assertGreaterEqual(summary[RISK_BREAKING], 1)
+            self.assertGreaterEqual(summary[RISK_REVIEW], 2)
+
+            by_subject = {item.subject: item for item in assessments}
+            # Pip-less venv + pip install in deploy.sh -> BREAKING CHANGE
+            pip_risk = by_subject["Virtualenv & Deployment Pip Compatibility"]
+            self.assertEqual(pip_risk.risk_level, RISK_BREAKING)
+            self.assertTrue(pip_risk.breaking_change)
+            self.assertIn("deploy.sh", pip_risk.affected_files)
+
+            # Python 3.11 in Jenkins vs 3.15.2 in GHA -> REVIEW REQUIRED with target 3.15.2
+            py_risk = by_subject["Runtime Alignment · Python"]
+            self.assertEqual(py_risk.risk_level, RISK_REVIEW)
+            self.assertEqual(py_risk.target_version, "3.15.2")
+            self.assertTrue(py_risk.sources)
+            self.assertTrue(any("UNKNOWN" in u for u in py_risk.uncertainties))
+
+            # PostgreSQL 18 in CI vs 16 in Docker -> LOW RISK (accepted difference, never forced)
+            pg_risk = by_subject["Service Compatibility · PostgreSQL"]
+            self.assertEqual(pg_risk.risk_level, RISK_LOW)
+            self.assertFalse(pg_risk.breaking_change)
+            self.assertTrue(pg_risk.sources)
+            self.assertTrue(pg_risk.uncertainties)
+
+
+class MigrationPlanGenerationTests(unittest.TestCase):
+    def test_generates_migration_and_rollback_plan_for_python_and_ci_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "requirements.txt").write_text("feedparser\n", encoding="utf-8")
+            (root / "Jenkinsfile").write_text(
+                "pipeline { agent { docker { image 'python:3.11' } } }\n",
+                encoding="utf-8",
+            )
+            wf_dir = root / ".github" / "workflows"
+            wf_dir.mkdir(parents=True)
+            (wf_dir / "tests.yml").write_text(
+                'services:\n  postgres:\n    image: postgres:18\nsteps:\n  - with:\n      python-version: "3.15.2"\n',
+                encoding="utf-8",
+            )
+            (root / "docker-compose.yml").write_text(
+                "services:\n  db:\n    image: postgres:16\n",
+                encoding="utf-8",
+            )
+            venv_target = root / ".venv-315"
+            (venv_target / "bin").mkdir(parents=True)
+            (venv_target / "bin" / "python").write_text("", encoding="utf-8")
+            os.symlink(".venv-315", root / ".venv")
+            (root / "deploy.sh").write_text("#!/bin/bash\npip install -r requirements.txt\n", encoding="utf-8")
+
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch(
+                "core.maintenance.detector.git_output",
+                side_effect=["staging", "?? .venv\n", "0\t1"],
+            ), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", return_value=empty_gh):
+                report = audit_repository(tmp_dir, "sjvtdm", include_ollama_analysis=False)
+
+            plan = generate_migration_plan(report)
+            self.assertEqual(plan.repo_name, "sjvtdm")
+            self.assertEqual(plan.target_versions["Python"], "3.15.2")
+            self.assertIn("Keep", plan.target_versions["PostgreSQL"])
+
+            file_paths = [f.path for f in plan.files_to_review]
+            self.assertIn("Jenkinsfile", file_paths)
+            self.assertIn("deploy.sh", file_paths)
+            self.assertIn(".git/info/exclude", file_paths)
+            self.assertIn("renovate.json", file_paths)
+
+            self.assertEqual(plan.rollback_plan.strategy, "virtualenv-symlink-and-git-revert")
+            self.assertIn(".venv-315-backup", plan.rollback_plan.backup_target)
+            self.assertTrue(any("uv pip" in step for step in plan.ordered_steps))
+            self.assertTrue(any("Sentinel" in step for step in plan.validation_steps))
+
+            buffer = io.StringIO()
+            test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+            render_risk_assessments(report.risk_assessments, target_console=test_console)
+            render_migration_plan(plan, target_console=test_console)
+            output = buffer.getvalue()
+            self.assertIn("Risk Classification & Target Versions", output)
+            self.assertIn("Migration & Rollback Plan", output)
+
+
+class ControlledMigrationPreparationTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_dry_run(False)
+
+    def test_prepares_and_applies_controlled_changes_with_branch_and_dry_run_guards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / ".git" / "info").mkdir(parents=True)
+            (root / "Jenkinsfile").write_text(
+                "pipeline { agent { docker { image 'python:3.11-slim' } } }\n",
+                encoding="utf-8",
+            )
+            wf_dir = root / ".github" / "workflows"
+            wf_dir.mkdir(parents=True)
+            (wf_dir / "tests.yml").write_text(
+                'steps:\n  - with:\n      python-version: "3.15.2"\n',
+                encoding="utf-8",
+            )
+            venv_target = root / ".venv-315"
+            (venv_target / "bin").mkdir(parents=True)
+            (venv_target / "bin" / "python").write_text("", encoding="utf-8")
+            os.symlink(".venv-315", root / ".venv")
+            (root / "deploy.sh").write_text("#!/bin/bash\npip install -r requirements.txt\n", encoding="utf-8")
+
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch(
+                "core.maintenance.detector.git_output",
+                side_effect=["staging", "?? .venv\n", "0\t1"],
+            ), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", return_value=empty_gh):
+                report = audit_repository(tmp_dir, "sjvtdm", include_ollama_analysis=False)
+
+            proposals = prepare_migration_changes(report)
+            by_path = {p.path: p for p in proposals}
+            self.assertIn("renovate.json", by_path)
+            self.assertIn(".git/info/exclude", by_path)
+            self.assertIn("Jenkinsfile", by_path)
+            self.assertIn("deploy.sh", by_path)
+            self.assertIn("python:3.15.2-slim", by_path["Jenkinsfile"].new_content)
+            self.assertIn("uv\" pip install", by_path["deploy.sh"].new_content)
+
+            # 1) Wrong branch must abort without modifying files
+            with patch(
+                "core.maintenance.detector.git_output",
+                side_effect=["master", "", "0\t0"],
+            ), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ):
+                aborted = apply_migration_changes(tmp_dir, proposals, expected_branch="staging")
+            self.assertEqual(aborted.status, "aborted")
+            self.assertFalse((root / "renovate.json").exists())
+
+            # 2) Dry-run on staging must simulate without writing files
+            set_dry_run(True)
+            with patch(
+                "core.maintenance.detector.git_output",
+                side_effect=["staging", "", "0\t0"],
+            ), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ):
+                sim = apply_migration_changes(tmp_dir, proposals, expected_branch="staging")
+            self.assertEqual(sim.status, "dry-run")
+            self.assertFalse((root / "renovate.json").exists())
+
+            # 3) Prod on staging writes the proposed changes
+            set_dry_run(False)
+            with patch(
+                "core.maintenance.detector.git_output",
+                side_effect=["staging", "", "0\t0"],
+            ), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ):
+                applied = apply_migration_changes(tmp_dir, proposals, expected_branch="staging")
+            self.assertEqual(applied.status, "applied")
+            self.assertTrue((root / "renovate.json").is_file())
+            self.assertIn("python:3.15.2-slim", (root / "Jenkinsfile").read_text(encoding="utf-8"))
+            self.assertIn(".venv", (root / ".git" / "info" / "exclude").read_text(encoding="utf-8"))
+
+            buffer = io.StringIO()
+            test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+            render_proposed_changes_preview(proposals, target_console=test_console)
+            render_migration_application_result(applied, target_console=test_console)
+            self.assertIn("Proposed Change #1", buffer.getvalue())
+
+
+class MigrationValidationTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_dry_run(False)
+
+    def test_skipped_tests_never_produce_false_pass_and_counts_all_statuses(self) -> None:
+        status, passed, failed, skipped, summary = parse_python_test_output(
+            "Ran 14 tests in 0.120s\n\nOK (skipped=2)",
+            0,
+        )
+        self.assertEqual(status, STATUS_SKIPPED)
+        self.assertEqual(passed, 12)
+        self.assertEqual(failed, 0)
+        self.assertEqual(skipped, 2)
+        self.assertIn("2 skipped", summary)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "tests").mkdir()
+            (root / "renovate.json").write_text(
+                json.dumps({"extends": ["github>nlabrazi/dev-platform//configs/renovate/base"]}),
+                encoding="utf-8",
+            )
+            (root / "Jenkinsfile").write_text(
+                "pipeline { agent { docker { image 'python:3.15.2' } } }\n",
+                encoding="utf-8",
+            )
+            wf_dir = root / ".github" / "workflows"
+            wf_dir.mkdir(parents=True)
+            (wf_dir / "tests.yml").write_text(
+                'steps:\n  - with:\n      python-version: "3.15.2"\n',
+                encoding="utf-8",
+            )
+
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch("core.maintenance.detector.git_output", return_value="staging"), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", return_value=empty_gh):
+                report = audit_repository(tmp_dir, "sjvtdm", include_ollama_analysis=False)
+
+            test_proc = subprocess.CompletedProcess(
+                args=["python3", "-m", "unittest"],
+                returncode=0,
+                stdout="",
+                stderr="Ran 10 tests in 0.05s\n\nOK (skipped=1)\n",
+            )
+            with patch("core.maintenance.validator.run_command", return_value=test_proc):
+                val_report = run_migration_validations(report, execute_local_tests=True)
+
+            self.assertIn("SKIPPED", val_report.overall_status)
+            self.assertGreaterEqual(val_report.counts_by_status[STATUS_SKIPPED], 1)
+            self.assertGreaterEqual(val_report.counts_by_status[STATUS_UNKNOWN], 1)
+            self.assertTrue(any("SKIPPED" in r for r in val_report.reservations))
+
+            buffer = io.StringIO()
+            test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+            render_validation_report(val_report, target_console=test_console)
+            rendered = buffer.getvalue()
+            self.assertIn("Validation Report", rendered)
+            self.assertIn("SKIPPED", rendered)
+
+
+class MaintenanceGitWorkflowIntegrationTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_dry_run(False)
+
+    def test_merge_renovate_pr_blocks_failed_ci_and_non_staging_targets(self) -> None:
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+
+        failed_pr = RenovatePRInfo(
+            number=14,
+            title="chore(deps): update dependency aiohttp to v3.11.0",
+            head_branch="renovate/aiohttp-3.x",
+            base_branch="staging",
+            ci_status=STATUS_FAIL,
+        )
+        with patch("core.maintenance.git_ops.run_command") as mock_run:
+            status = merge_renovate_pr_to_staging("/tmp/repo", "repo", failed_pr, target_console=test_console)
+        self.assertEqual(status, "blocked")
+        mock_run.assert_not_called()
+
+        master_pr = RenovatePRInfo(
+            number=15,
+            title="chore(deps): update dependency requests",
+            head_branch="renovate/requests-2.x",
+            base_branch="master",
+            is_onboarding=False,
+            ci_status=STATUS_PASS,
+        )
+        with patch("core.maintenance.git_ops.run_command") as mock_run:
+            status2 = merge_renovate_pr_to_staging("/tmp/repo", "repo", master_pr, target_console=test_console)
+        self.assertEqual(status2, "blocked")
+        mock_run.assert_not_called()
+
+    def test_merge_renovate_pr_respects_dry_run_and_executes_in_prod_with_sync(self) -> None:
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+
+        passing_pr = RenovatePRInfo(
+            number=18,
+            title="chore(deps): update python docker tag to v3.15.2",
+            head_branch="renovate/python-3.x",
+            base_branch="staging",
+            ci_status=STATUS_PASS,
+        )
+
+        set_dry_run(True)
+        with patch("core.maintenance.git_ops.ask_yes_no", return_value=True), patch(
+            "core.maintenance.git_ops.run_command"
+        ) as mock_run:
+            dry_status = merge_renovate_pr_to_staging("/tmp/repo", "repo", passing_pr, target_console=test_console)
+        self.assertEqual(dry_status, "dry-run")
+        mock_run.assert_not_called()
+
+        set_dry_run(False)
+        ok_proc = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="Merged\n", stderr="")
+        with patch("core.maintenance.git_ops.ask_yes_no", side_effect=[True, True]), patch(
+            "core.maintenance.git_ops.run_command", return_value=ok_proc
+        ) as mock_run, patch("core.maintenance.git_ops.pull_ff_only", return_value="pulled") as mock_pull:
+            prod_status = merge_renovate_pr_to_staging("/tmp/repo", "repo", passing_pr, target_console=test_console)
+        self.assertEqual(prod_status, "merged")
+        mock_run.assert_called_once()
+        mock_pull.assert_called_once_with("/tmp/repo", "repo", "staging")
+
+    def test_delegates_to_commit_and_merge_workflows_with_safety_checks(self) -> None:
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+
+        # Auto-commit blocked on master
+        with patch(
+            "core.maintenance.detector.git_output",
+            side_effect=["master", "", "0\t0"],
+        ), patch(
+            "core.maintenance.detector.resolve_repo_base_branch",
+            return_value=("master", "resolved"),
+        ), patch("core.maintenance.git_ops.auto_commit_all_repos") as mock_commit:
+            res_blocked = run_maintenance_auto_commit("/tmp/root/repo", "repo", target_console=test_console)
+        self.assertIsNone(res_blocked)
+        mock_commit.assert_not_called()
+
+        # Auto-commit allowed on staging after confirmation
+        with patch(
+            "core.maintenance.detector.git_output",
+            side_effect=["staging", " M README.md\n", "1\t0"],
+        ), patch(
+            "core.maintenance.detector.resolve_repo_base_branch",
+            return_value=("master", "resolved"),
+        ), patch("core.maintenance.git_ops.ask_yes_no", return_value=True), patch(
+            "core.maintenance.git_ops.auto_commit_all_repos",
+            return_value={"committed": 1, "pushed": 1},
+        ) as mock_commit:
+            res_ok = run_maintenance_auto_commit("/tmp/root/repo", "repo", target_console=test_console)
+        self.assertEqual(res_ok, {"committed": 1, "pushed": 1})
+        mock_commit.assert_called_once()
+
+        # Promote blocked when worktree is dirty
+        with patch(
+            "core.maintenance.detector.git_output",
+            side_effect=["staging", " M README.md\n", "1\t0"],
+        ), patch(
+            "core.maintenance.detector.resolve_repo_base_branch",
+            return_value=("master", "resolved"),
+        ), patch("core.maintenance.git_ops.merge_all_repos") as mock_merge:
+            prom_blocked = run_maintenance_promote_to_base("/tmp/root/repo", "repo", target_console=test_console)
+        self.assertEqual(prom_blocked, "blocked")
+        mock_merge.assert_not_called()
+
+        # Promote allowed when clean and confirmed
+        with patch(
+            "core.maintenance.detector.git_output",
+            side_effect=["staging", "", "1\t0"],
+        ), patch(
+            "core.maintenance.detector.resolve_repo_base_branch",
+            return_value=("master", "resolved"),
+        ), patch("core.maintenance.git_ops.ask_yes_no", return_value=True), patch(
+            "core.maintenance.git_ops.merge_all_repos"
+        ) as mock_merge:
+            prom_ok = run_maintenance_promote_to_base("/tmp/root/repo", "repo", target_console=test_console)
+        self.assertEqual(prom_ok, "executed")
+        mock_merge.assert_called_once()
+
+
+class ProductionInspectionTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_dry_run(False)
+
+    def test_unconfigured_and_unreachable_ssh_production(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DEVTOOLS_PRODUCTION_SSH_HOST", None)
+            os.environ.pop("DEVTOOLS_PRODUCTION_DEPLOY_ROOT", None)
+            unconf = inspect_production_environment("sjvtdm")
+        self.assertFalse(unconf.configured)
+        self.assertFalse(unconf.reachable)
+        self.assertEqual(unconf.access_mode, "unconfigured")
+
+        failed_ssh = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=255,
+            stdout="",
+            stderr="ssh: connect to host vps.example.com port 22: Connection timed out",
+        )
+        with patch("core.maintenance.production.run_command", return_value=failed_ssh):
+            unreach = inspect_production_environment("sjvtdm", ssh_host="vps.example.com")
+        self.assertTrue(unreach.configured)
+        self.assertFalse(unreach.reachable)
+        self.assertEqual(unreach.access_mode, "ssh")
+        self.assertTrue(any("vps.example.com" in issue for issue in unreach.issues))
+
+    def test_inspects_configured_local_production_directory_and_venv_backups(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            app_dir = Path(tmp_dir) / "sjvtdm"
+            venv_target = app_dir / ".venv-315"
+            (venv_target / "bin").mkdir(parents=True)
+            (venv_target / "bin" / "python").write_text("", encoding="utf-8")
+            (venv_target / "pyvenv.cfg").write_text("version_info = 3.15.2\n", encoding="utf-8")
+            os.symlink(".venv-315", app_dir / ".venv")
+            (app_dir / ".venv-313-backup").mkdir(parents=True)
+            (app_dir / "deploy.sh").write_text("#!/bin/bash\npip install -r requirements.txt\n", encoding="utf-8")
+
+            prod_info = inspect_production_environment("sjvtdm", deploy_root=tmp_dir)
+
+            self.assertTrue(prod_info.configured)
+            self.assertTrue(prod_info.reachable)
+            self.assertEqual(prod_info.runtime_versions.get("Python"), "3.15.2")
+            self.assertTrue(prod_info.venv_is_symlink)
+            self.assertEqual(prod_info.venv_target, ".venv-315")
+            self.assertFalse(prod_info.venv_has_pip)
+            self.assertIn(".venv-313-backup", prod_info.backup_venvs)
+            self.assertFalse(prod_info.deploy_uses_uv_pip)
+            self.assertTrue(any("uv pip install" in issue for issue in prod_info.issues))
+
+            buffer = io.StringIO()
+            test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+            render_production_environment_info(prod_info, target_console=test_console)
+            self.assertIn("3.15.2", buffer.getvalue())
+            self.assertIn(".venv-313-backup", buffer.getvalue())
+
+
+class DeploymentAndRollbackChecksTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_dry_run(False)
+
+    def test_deployment_checklist_blocks_raw_pip_and_dirty_worktree_and_enforces_sentinel_cron_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir, tempfile.TemporaryDirectory() as prod_dir:
+            root = Path(tmp_dir)
+            (root / "renovate.json").write_text(
+                json.dumps({"extends": ["github>nlabrazi/dev-platform//configs/renovate/base"]}),
+                encoding="utf-8",
+            )
+            app_dir = Path(prod_dir) / "sjvtdm"
+            venv_target = app_dir / ".venv-315"
+            (venv_target / "bin").mkdir(parents=True)
+            (venv_target / "bin" / "python").write_text("", encoding="utf-8")
+            os.symlink(".venv-315", app_dir / ".venv")
+            (app_dir / ".venv-313-backup").mkdir(parents=True)
+            (app_dir / "deploy.sh").write_text("#!/bin/bash\npip install -r requirements.txt\n", encoding="utf-8")
+
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch(
+                "core.maintenance.detector.git_output",
+                side_effect=["staging", " M README.md\n", "0\t0"],
+            ), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", return_value=empty_gh):
+                report = audit_repository(tmp_dir, "sjvtdm", include_ollama_analysis=False)
+
+            prod_info = inspect_production_environment("sjvtdm", deploy_root=prod_dir)
+            checklist = prepare_deployment_and_rollback(report, prod_info)
+            self.assertFalse(checklist.ready_to_deploy)
+            self.assertGreaterEqual(len(checklist.blockers), 2)
+            self.assertTrue(any(".venv-313-backup" in step for step in checklist.rollback_steps))
+            self.assertTrue(any("Debian Python" in rule for rule in checklist.safety_rules))
+
+            pending_post = verify_post_deployment(
+                "sjvtdm",
+                prod_info,
+                service_status=STATUS_PASS,
+                database_status=STATUS_PASS,
+                sentinel_cron_verified=False,
+            )
+            self.assertEqual(pending_post.scheduled_jobs_status, "PENDING VERIFICATION")
+            self.assertEqual(pending_post.overall_status, "AWAITING FINAL RUNTIME / CRON CHECK")
+            self.assertTrue(any("Scheduled jobs: PENDING VERIFICATION" in n for n in pending_post.notes))
+
+            verified_post = verify_post_deployment(
+                "sjvtdm",
+                prod_info,
+                service_status=STATUS_PASS,
+                database_status=STATUS_PASS,
+                sentinel_cron_verified=True,
+            )
+            self.assertEqual(verified_post.scheduled_jobs_status, STATUS_PASS)
+            self.assertEqual(verified_post.overall_status, "VERIFIED IN PRODUCTION")
+
+            buffer = io.StringIO()
+            test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+            render_deployment_checklist(checklist, target_console=test_console)
+            render_post_deploy_verification(pending_post, target_console=test_console)
+            rendered = buffer.getvalue()
+            self.assertIn("BLOCKED", rendered)
+            self.assertIn("PENDING VERIFICATION", rendered)
+
+
+class MaintenanceSessionResumeTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_dry_run(False)
+
+    def test_journal_tracks_and_resumes_operations_and_respects_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / ".git").mkdir()
+
+            # Dry-run does not write journal file
+            set_dry_run(True)
+            dry_status, _ = record_maintenance_step(
+                tmp_dir,
+                "sjvtdm",
+                "audit",
+                "ACTION REQUIRED",
+                details="1 open PR",
+                pending_actions=["Align Jenkinsfile Python version"],
+            )
+            self.assertEqual(dry_status, "dry-run")
+            self.assertIsNone(load_maintenance_journal(tmp_dir, "sjvtdm"))
+
+            # Prod writes journal inside .git/devtools-maintenance-journal.json
+            set_dry_run(False)
+            save_status, journal1 = record_maintenance_step(
+                tmp_dir,
+                "sjvtdm",
+                "audit",
+                "ACTION REQUIRED",
+                details="1 open PR",
+                pending_actions=["Align Jenkinsfile Python version"],
+            )
+            self.assertEqual(save_status, "saved")
+            rec_choice, rec_desc = get_resume_recommendation(journal1)
+            self.assertEqual(rec_choice, "4")
+            self.assertIn("migration changes", rec_desc)
+
+            _, journal2 = record_maintenance_step(
+                tmp_dir,
+                "sjvtdm",
+                "prepare_changes",
+                "APPLIED",
+                details="Jenkinsfile",
+            )
+            loaded = load_maintenance_journal(tmp_dir, "sjvtdm")
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(loaded.current_stage, "prepare_changes")
+            self.assertEqual(len(loaded.completed_steps), 2)
+            rec_choice2, _ = get_resume_recommendation(loaded)
+            self.assertEqual(rec_choice2, "5")
+
+            buffer = io.StringIO()
+            test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+            render_maintenance_journal(loaded, target_console=test_console)
+            rendered = buffer.getvalue()
+            self.assertIn("Resume Guide", rendered)
+            self.assertIn("prepare_changes", rendered)
+            self.assertIn("menu [5]", rendered)
+
+
+if __name__ == "__main__":
+    unittest.main()

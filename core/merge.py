@@ -68,7 +68,8 @@ def checkout_update_base_branch(repo_path: str, base_branch: str) -> None:
 
 
 def resolve_merge_base_branch(path: str) -> tuple[str | None, str]:
-    git_command(path, ["fetch", DEFAULT_REMOTE, "--prune"], silent=True)
+    if not is_dry_run():
+        git_command(path, ["fetch", DEFAULT_REMOTE, "--prune"], silent=True)
     return resolve_repo_base_branch(path, DEFAULT_REMOTE)
 
 
@@ -286,6 +287,9 @@ def create_and_merge_pr(path: str, repo_name: str, base_branch: str | None = Non
 
     if pr_number:
         print(f"🔗 Existing Pull Request detected: #{pr_number}")
+        if not ask_yes_no(f"🚀 Do you want to enable auto-merge for existing PR #{pr_number}?", default="n"):
+            print("❌ Skipped.\n")
+            return
         if is_dry_run():
             print(f"🧪 Dry-run: would enable auto-merge for PR #{pr_number} in {repo_name}.")
             return

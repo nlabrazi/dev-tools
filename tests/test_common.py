@@ -56,30 +56,25 @@ class DryRunTests(unittest.TestCase):
             timeout=None,
         )
 
-    def test_run_command_allows_fetch_and_readonly_gh_commands_in_dry_run(self) -> None:
+    def test_run_command_blocks_fetch_and_allows_readonly_gh_commands_in_dry_run(self) -> None:
         set_dry_run(True)
 
-        fetch_completed = subprocess.CompletedProcess(
-            args=["git", "fetch", "--all", "--prune"],
-            returncode=0,
-            stdout="",
-            stderr="",
-        )
         gh_completed = subprocess.CompletedProcess(
             args=["gh", "pr", "view", "42", "--json", "state"],
             returncode=0,
             stdout='{"state":"OPEN"}',
             stderr="",
         )
-        with patch("utils.common.subprocess.run", side_effect=[fetch_completed, gh_completed]) as subprocess_run, patch(
+        with patch("utils.common.subprocess.run", return_value=gh_completed) as subprocess_run, patch(
             "builtins.print"
         ):
             fetch_result = run_command(["git", "fetch", "--all", "--prune"], cwd="/tmp/repo", silent=True)
             gh_result = run_command(["gh", "pr", "view", "42", "--json", "state"], cwd="/tmp/repo", silent=True)
 
-        self.assertEqual(fetch_result.returncode, 0)
+        self.assertEqual(fetch_result.returncode, 99)
+        self.assertIn("blocked mutating command", fetch_result.stderr)
         self.assertEqual(gh_result.returncode, 0)
-        self.assertEqual(subprocess_run.call_count, 2)
+        subprocess_run.assert_called_once()
 
     def test_run_command_checked_raises_dry_run_blocked_error_for_mutations(self) -> None:
         set_dry_run(True)
