@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import subprocess
@@ -5,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from rich.console import Console
 
 from core.maintenance import (
     DRIFT_ACCEPTED,
@@ -19,13 +22,18 @@ from core.maintenance import (
     RenovatePRInfo,
     RenovateUpdateItem,
     analyze_renovate_pr,
+    audit_repository,
     build_environment_matrix,
     collect_declared_versions,
     detect_project_stacks,
+    format_report_json,
+    format_report_markdown,
     inspect_dependency_dashboard,
     inspect_git_state,
     inspect_renovate_config,
     parse_renovate_pr_body,
+    render_audit_report,
+    save_audit_report,
 )
 from core.ollama import OllamaError
 from utils.common import set_dry_run
@@ -358,6 +366,54 @@ class RenovateAndOllamaPRTests(unittest.TestCase):
         self.assertTrue(info.no_open_or_pending)
         self.assertEqual(info.open_items, [])
         self.assertEqual(info.detected_managers, ["github-actions", "pip_requirements"])
+
+
+class AuditAndExportDryRunTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_dry_run(False)
+
+    def test_save_audit_report_respects_dry_run_and_writes_files_in_prod(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "renovate.json").write_text(
+                json.dumps({"extends": ["github>nlabrazi/dev-platform//configs/renovate/base"]}),
+                encoding="utf-8",
+            )
+            (root / "Jenkinsfile").write_text(
+                "pipeline { agent { docker { image 'python:3.15.2' } } }\n",
+                encoding="utf-8",
+            )
+
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch("core.maintenance.detector.git_output", return_value="staging"), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", return_value=empty_gh):
+                report = audit_repository(tmp_dir, "demo", include_ollama_analysis=False)
+
+            set_dry_run(True)
+            status_dry, paths_dry = save_audit_report(report, output_dir=tmp_dir)
+            self.assertEqual(status_dry, "dry-run")
+            for p in paths_dry:
+                self.assertFalse(Path(p).exists())
+
+            set_dry_run(False)
+            status_prod, paths_prod = save_audit_report(report, output_dir=tmp_dir)
+            self.assertEqual(status_prod, "saved")
+            for p in paths_prod:
+                self.assertTrue(Path(p).is_file())
+
+            parsed_json = json.loads(format_report_json(report))
+            self.assertEqual(parsed_json["repo_name"], "demo")
+            md_text = format_report_markdown(report)
+            self.assertIn("# Dependency Maintenance Audit — `demo`", md_text)
+
+            buffer = io.StringIO()
+            test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+            render_audit_report(report, target_console=test_console)
+            rendered = buffer.getvalue()
+            self.assertIn("Environment Version Matrix", rendered)
+            self.assertIn("Final Maintenance Summary", rendered)
 
 
 if __name__ == "__main__":

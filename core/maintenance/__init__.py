@@ -44,8 +44,17 @@ from core.maintenance.renovate import (
     inspect_single_renovate_pr,
     parse_renovate_pr_body,
 )
+from core.maintenance.reporter import (
+    format_executive_summary_text,
+    format_report_json,
+    format_report_markdown,
+    render_audit_report,
+    render_renovate_pr_analysis,
+    save_audit_report,
+)
 from core.maintenance.workflow import (
     ask_maintenance_action,
+    audit_repository,
     render_maintenance_menu,
     run_dependency_maintenance_for_repo,
 )
@@ -78,11 +87,15 @@ __all__ = [
     "StackComponent",
     "analyze_renovate_pr",
     "ask_maintenance_action",
+    "audit_repository",
     "build_environment_matrix",
     "build_fallback_pr_analysis",
     "collect_declared_versions",
     "detect_deployment_files",
     "detect_project_stacks",
+    "format_executive_summary_text",
+    "format_report_json",
+    "format_report_markdown",
     "inspect_ci_status",
     "inspect_dependency_dashboard",
     "inspect_git_state",
@@ -90,6 +103,9 @@ __all__ = [
     "inspect_renovate_config",
     "inspect_single_renovate_pr",
     "parse_renovate_pr_body",
+    "render_audit_report",
     "render_maintenance_menu",
+    "render_renovate_pr_analysis",
     "run_dependency_maintenance_for_repo",
+    "save_audit_report",
 ]
