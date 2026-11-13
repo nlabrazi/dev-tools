@@ -28,6 +28,7 @@ from core.maintenance.models import (
     AuditReport,
 )
 from core.maintenance.planner import generate_migration_plan
+from core.maintenance.production import inspect_production_environment
 from core.maintenance.renovate import (
     inspect_ci_status,
     inspect_dependency_dashboard,
@@ -87,7 +88,17 @@ def audit_repository(
         git_state=git_state,
     )
     declared_versions = collect_declared_versions(repo_path)
-    env_matrix = build_environment_matrix(repo_path, declared_versions)
+    prod_info = inspect_production_environment(repo_name)
+    prod_overrides = (
+        prod_info.runtime_versions
+        if (prod_info.configured and prod_info.reachable and prod_info.runtime_versions)
+        else None
+    )
+    env_matrix = build_environment_matrix(
+        repo_path,
+        declared_versions,
+        production_overrides=prod_overrides,
+    )
     renovate_config = inspect_renovate_config(repo_path)
     dashboard = inspect_dependency_dashboard(repo_path)
     open_prs, pr_warnings = inspect_open_renovate_prs(
@@ -100,7 +111,7 @@ def audit_repository(
     ci_summary = inspect_ci_status(repo_path)
 
     reservations: list[str] = []
-    for item in detector_reservations + renovate_config.issues + pr_warnings:
+    for item in detector_reservations + renovate_config.issues + pr_warnings + prod_info.issues:
         if item and item not in reservations:
             reservations.append(item)
 
@@ -154,6 +165,7 @@ def audit_repository(
         deployment_files=deployment_files,
         reservations=reservations,
         overall_status=overall_status,
+        production_info=prod_info,
     )
     risk_assessments = classify_repository_update_risks(base_report)
     migration_plan = generate_migration_plan(base_report, risk_assessments, now=now)
@@ -174,6 +186,7 @@ def audit_repository(
         overall_status=base_report.overall_status,
         risk_assessments=risk_assessments,
         migration_plan=migration_plan,
+        production_info=prod_info,
     )
 
 

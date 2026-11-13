@@ -48,6 +48,7 @@ from core.maintenance.models import (
     MigrationApplicationResult,
     MigrationFileTarget,
     MigrationPlan,
+    ProductionEnvironmentInfo,
     ProposedFileChange,
     RenovateConfigInfo,
     RenovatePRAnalysis,
@@ -60,6 +61,7 @@ from core.maintenance.models import (
     ValidationReport,
 )
 from core.maintenance.planner import generate_migration_plan
+from core.maintenance.production import inspect_production_environment
 from core.maintenance.renovate import (
     analyze_renovate_pr,
     build_fallback_pr_analysis,
@@ -76,6 +78,7 @@ from core.maintenance.reporter import (
     render_audit_report,
     render_migration_application_result,
     render_migration_plan,
+    render_production_environment_info,
     render_proposed_changes_preview,
     render_renovate_pr_analysis,
     render_risk_assessments,
@@ -107,6 +110,7 @@ __all__ = [
     "MigrationApplicationResult",
     "MigrationFileTarget",
     "MigrationPlan",
+    "ProductionEnvironmentInfo",
     "ProposedFileChange",
     "RISK_BLOCKED",
     "RISK_BREAKING",
@@ -146,6 +150,7 @@ __all__ = [
     "inspect_dependency_dashboard",
     "inspect_git_state",
     "inspect_open_renovate_prs",
+    "inspect_production_environment",
     "inspect_renovate_config",
     "inspect_single_renovate_pr",
     "merge_renovate_pr_to_staging",
@@ -157,6 +162,7 @@ __all__ = [
     "render_maintenance_menu",
     "render_migration_application_result",
     "render_migration_plan",
+    "render_production_environment_info",
     "render_proposed_changes_preview",
     "render_renovate_pr_analysis",
     "render_risk_assessments",

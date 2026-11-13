@@ -17,6 +17,7 @@ from core.maintenance.models import (
     AuditReport,
     MigrationApplicationResult,
     MigrationPlan,
+    ProductionEnvironmentInfo,
     ProposedFileChange,
     RenovatePRInfo,
     UpdateRiskAssessment,
@@ -488,6 +489,47 @@ def render_validation_report(
 
     tone = "success" if report.overall_status == STATUS_PASS else ("danger" if report.overall_status == STATUS_FAIL else "warning")
     out.print(ui_panel("\n".join(summary_lines), title="Validation Summary", tone=tone))
+
+
+def render_production_environment_info(
+    prod_info: ProductionEnvironmentInfo,
+    *,
+    target_console: Console | None = None,
+) -> None:
+    out = target_console or console
+    if not prod_info.configured:
+        out.print(
+            ui_panel(
+                prod_info.details or "Production access is not configured.",
+                title="Production Environment Inspection",
+                tone="info",
+                compact=True,
+            )
+        )
+        return
+
+    tone = "success" if (prod_info.reachable and not prod_info.issues) else ("danger" if not prod_info.reachable else "warning")
+    lines = [
+        f"[bold white]Access mode:[/] {prod_info.access_mode}  [dim]|[/]  [bold white]Reachable:[/] {'YES' if prod_info.reachable else 'NO'}",
+        f"[bold white]Application path:[/] [cyan]{prod_info.app_path}[/]",
+    ]
+    if prod_info.runtime_versions:
+        runtimes = ", ".join(f"{k}: {v}" for k, v in prod_info.runtime_versions.items())
+        lines.append(f"[bold white]Detected runtimes:[/] {runtimes}")
+    if prod_info.venv_path:
+        venv_desc = f"symlink → {prod_info.venv_target}" if prod_info.venv_is_symlink else "directory"
+        if prod_info.venv_has_pip is False:
+            venv_desc += " (no pip binary)"
+        lines.append(f"[bold white]Production .venv:[/] {venv_desc}")
+    if prod_info.backup_venvs:
+        lines.append(f"[bold white]Backup virtualenvs:[/] {', '.join(prod_info.backup_venvs)}")
+    if prod_info.issues:
+        lines.append("")
+        lines.append("[bold yellow]Production Alerts:[/]")
+        for issue in prod_info.issues:
+            lines.append(f"- {issue}")
+
+    out.print(ui_panel("\n".join(lines), title="Production Environment Inspection", tone=tone))
 
 
 

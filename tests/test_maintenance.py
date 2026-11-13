@@ -37,6 +37,7 @@ from core.maintenance import (
     generate_migration_plan,
     inspect_dependency_dashboard,
     inspect_git_state,
+    inspect_production_environment,
     inspect_renovate_config,
     merge_renovate_pr_to_staging,
     parse_dashboard_pending_update,
@@ -46,6 +47,7 @@ from core.maintenance import (
     render_audit_report,
     render_migration_application_result,
     render_migration_plan,
+    render_production_environment_info,
     render_proposed_changes_preview,
     render_risk_assessments,
     render_validation_report,
@@ -852,6 +854,62 @@ class MaintenanceGitWorkflowIntegrationTests(unittest.TestCase):
             prom_ok = run_maintenance_promote_to_base("/tmp/root/repo", "repo", target_console=test_console)
         self.assertEqual(prom_ok, "executed")
         mock_merge.assert_called_once()
+
+
+class ProductionInspectionTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_dry_run(False)
+
+    def test_unconfigured_and_unreachable_ssh_production(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DEVTOOLS_PRODUCTION_SSH_HOST", None)
+            os.environ.pop("DEVTOOLS_PRODUCTION_DEPLOY_ROOT", None)
+            unconf = inspect_production_environment("sjvtdm")
+        self.assertFalse(unconf.configured)
+        self.assertFalse(unconf.reachable)
+        self.assertEqual(unconf.access_mode, "unconfigured")
+
+        failed_ssh = subprocess.CompletedProcess(
+            args=["ssh"],
+            returncode=255,
+            stdout="",
+            stderr="ssh: connect to host vps.example.com port 22: Connection timed out",
+        )
+        with patch("core.maintenance.production.run_command", return_value=failed_ssh):
+            unreach = inspect_production_environment("sjvtdm", ssh_host="vps.example.com")
+        self.assertTrue(unreach.configured)
+        self.assertFalse(unreach.reachable)
+        self.assertEqual(unreach.access_mode, "ssh")
+        self.assertTrue(any("vps.example.com" in issue for issue in unreach.issues))
+
+    def test_inspects_configured_local_production_directory_and_venv_backups(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            app_dir = Path(tmp_dir) / "sjvtdm"
+            venv_target = app_dir / ".venv-315"
+            (venv_target / "bin").mkdir(parents=True)
+            (venv_target / "bin" / "python").write_text("", encoding="utf-8")
+            (venv_target / "pyvenv.cfg").write_text("version_info = 3.15.2\n", encoding="utf-8")
+            os.symlink(".venv-315", app_dir / ".venv")
+            (app_dir / ".venv-313-backup").mkdir(parents=True)
+            (app_dir / "deploy.sh").write_text("#!/bin/bash\npip install -r requirements.txt\n", encoding="utf-8")
+
+            prod_info = inspect_production_environment("sjvtdm", deploy_root=tmp_dir)
+
+            self.assertTrue(prod_info.configured)
+            self.assertTrue(prod_info.reachable)
+            self.assertEqual(prod_info.runtime_versions.get("Python"), "3.15.2")
+            self.assertTrue(prod_info.venv_is_symlink)
+            self.assertEqual(prod_info.venv_target, ".venv-315")
+            self.assertFalse(prod_info.venv_has_pip)
+            self.assertIn(".venv-313-backup", prod_info.backup_venvs)
+            self.assertFalse(prod_info.deploy_uses_uv_pip)
+            self.assertTrue(any("uv pip install" in issue for issue in prod_info.issues))
+
+            buffer = io.StringIO()
+            test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+            render_production_environment_info(prod_info, target_console=test_console)
+            self.assertIn("3.15.2", buffer.getvalue())
+            self.assertIn(".venv-313-backup", buffer.getvalue())
 
 
 if __name__ == "__main__":

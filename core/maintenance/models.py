@@ -255,6 +255,27 @@ class RollbackPlan:
 
 
 @dataclass(frozen=True)
+class ProductionEnvironmentInfo:
+    configured: bool = False
+    reachable: bool = False
+    access_mode: str = "unconfigured"
+    app_path: str = ""
+    runtime_versions: dict[str, str] = field(default_factory=dict)
+    venv_path: str | None = None
+    venv_is_symlink: bool = False
+    venv_target: str | None = None
+    venv_has_pip: bool | None = None
+    backup_venvs: list[str] = field(default_factory=list)
+    deploy_script_path: str | None = None
+    deploy_uses_uv_pip: bool | None = None
+    issues: list[str] = field(default_factory=list)
+    details: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class MigrationPlan:
     repo_name: str
     generated_at: str
@@ -290,6 +311,7 @@ class AuditReport:
     overall_status: str = "AUDIT COMPLETE"
     risk_assessments: list[UpdateRiskAssessment] = field(default_factory=list)
     migration_plan: MigrationPlan | None = None
+    production_info: ProductionEnvironmentInfo | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
