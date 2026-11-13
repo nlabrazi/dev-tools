@@ -18,6 +18,7 @@ from core.maintenance.git_ops import (
     merge_renovate_pr_to_staging,
     run_maintenance_auto_commit,
     run_maintenance_promote_to_base,
+    run_renovate_onboarding_workflow,
 )
 from core.maintenance.journal import (
     get_resume_recommendation,
@@ -89,6 +90,7 @@ from core.maintenance.renovate import (
 )
 from core.maintenance.reporter import (
     format_executive_summary_text,
+    format_pr_decision_badge,
     format_report_json,
     format_report_markdown,
     render_audit_report,
@@ -98,6 +100,7 @@ from core.maintenance.reporter import (
     render_migration_plan,
     render_post_deploy_verification,
     render_production_environment_info,
+    render_project_dashboard,
     render_proposed_changes_preview,
     render_renovate_pr_analysis,
     render_risk_assessments,
@@ -113,6 +116,7 @@ from core.maintenance.workflow import (
     audit_repository,
     render_maintenance_menu,
     run_dependency_maintenance_for_repo,
+    run_guided_pr_bump_workflow,
 )
 
 __all__ = [
@@ -167,6 +171,7 @@ __all__ = [
     "detect_project_stacks",
     "extract_release_notes_signals",
     "format_executive_summary_text",
+    "format_pr_decision_badge",
     "format_report_json",
     "format_report_markdown",
     "generate_migration_plan",
@@ -194,15 +199,18 @@ __all__ = [
     "render_migration_plan",
     "render_post_deploy_verification",
     "render_production_environment_info",
+    "render_project_dashboard",
     "render_proposed_changes_preview",
     "render_renovate_pr_analysis",
     "render_risk_assessments",
     "render_validation_report",
     "resolve_journal_path",
     "run_dependency_maintenance_for_repo",
+    "run_guided_pr_bump_workflow",
     "run_maintenance_auto_commit",
     "run_maintenance_promote_to_base",
     "run_migration_validations",
+    "run_renovate_onboarding_workflow",
     "save_audit_report",
     "save_maintenance_journal",
     "summarize_risk_assessments",

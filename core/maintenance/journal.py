@@ -10,13 +10,15 @@ from core.maintenance.models import (
 from utils.common import is_dry_run
 
 STEP_ORDER_NEXT: dict[str, tuple[str, str]] = {
-    "audit": ("4", "Prepare controlled local migration changes on staging (or 3 to inspect risk & migration plan)."),
-    "plan": ("4", "Preview and apply controlled local migration changes on staging."),
-    "prepare_changes": ("5", "Run local unit/integration validations and verify PASS/FAIL/SKIPPED counts."),
-    "validate": ("6", "Commit on staging, merge Renovate PRs, or promote staging → base branch."),
-    "git_workflow": ("7", "Inspect production .venv backups, deployment checklist, and Sentinel post-deploy status."),
-    "production_check": ("8", "Export the final audit & maintenance report."),
-    "export": ("q", "Maintenance session complete."),
+    "audit": ("1", "Déployer/aligner Renovate [1] ou traiter les PRs Renovate ouvertes [2]."),
+    "plan": ("1", "Déployer/aligner Renovate et les fichiers CI/déploiement [1]."),
+    "onboarding": ("2", "Traiter les PRs Renovate et valider la suite de tests [2]."),
+    "prepare_changes": ("2", "Traiter les PRs Renovate et valider la suite de tests [2]."),
+    "validate": ("4", "Vérifier la checklist de production et le statut post-déploiement Sentinel [4]."),
+    "git_workflow": ("4", "Vérifier la checklist de production et le statut post-déploiement Sentinel [4]."),
+    "bump": ("4", "Vérifier la checklist de production et le statut post-déploiement Sentinel [4]."),
+    "production_check": ("3", "Exporter le rapport final ou inspecter les détails [3]."),
+    "export": ("q", "Session de maintenance terminée."),
 }
 
 

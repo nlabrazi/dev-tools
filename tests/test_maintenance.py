@@ -32,6 +32,7 @@ from core.maintenance import (
     collect_declared_versions,
     detect_project_stacks,
     extract_release_notes_signals,
+    format_pr_decision_badge,
     format_report_json,
     format_report_markdown,
     generate_migration_plan,
@@ -55,12 +56,15 @@ from core.maintenance import (
     render_migration_plan,
     render_post_deploy_verification,
     render_production_environment_info,
+    render_project_dashboard,
     render_proposed_changes_preview,
     render_risk_assessments,
     render_validation_report,
+    run_guided_pr_bump_workflow,
     run_maintenance_auto_commit,
     run_maintenance_promote_to_base,
     run_migration_validations,
+    run_renovate_onboarding_workflow,
     save_audit_report,
     summarize_risk_assessments,
     verify_migration_git_preconditions,
@@ -584,11 +588,16 @@ class MigrationPlanGenerationTests(unittest.TestCase):
 
             buffer = io.StringIO()
             test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+            render_project_dashboard(report, target_console=test_console)
             render_risk_assessments(report.risk_assessments, target_console=test_console)
             render_migration_plan(plan, target_console=test_console)
             output = buffer.getvalue()
+            self.assertIn("État du Projet", output)
+            self.assertIn("PRs Renovate & Décisions de Bump", output)
             self.assertIn("Risk Classification & Target Versions", output)
             self.assertIn("Migration & Rollback Plan", output)
+            for idx, step in enumerate(plan.ordered_steps, start=1):
+                self.assertTrue(step.startswith(f"{idx}. "))
 
 
 class ControlledMigrationPreparationTests(unittest.TestCase):
@@ -863,6 +872,68 @@ class MaintenanceGitWorkflowIntegrationTests(unittest.TestCase):
         self.assertEqual(prom_ok, "executed")
         mock_merge.assert_called_once()
 
+    def test_automated_renovate_onboarding_workflow_handles_private_registry_and_branch_switch(self) -> None:
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / ".npmrc").write_text("@nlabrazi:registry=https://npm.pkg.github.com\n", encoding="utf-8")
+            (root / "package.json").write_text(
+                json.dumps({"dependencies": {"@nlabrazi/Sentinel-sdk": "^1.0.0"}}),
+                encoding="utf-8",
+            )
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch(
+                "core.maintenance.detector.git_output",
+                side_effect=["master", "", "0\t0"],
+            ), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", return_value=empty_gh):
+                report = audit_repository(tmp_dir, "riftvision", include_ollama_analysis=False)
+
+            proposals = prepare_migration_changes(report)
+            self.assertEqual(len(proposals), 1)
+            self.assertEqual(proposals[0].path, "renovate.json")
+            self.assertIn("npm.pkg.github.com", proposals[0].new_content)
+
+            with patch(
+                "core.maintenance.detector.git_output",
+                side_effect=["master", "", "0\t0", "staging", "", "0\t0"],
+            ), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.git_ops.ask_yes_no", return_value=True), patch(
+                "core.maintenance.git_ops.ensure_local_branch_exists", return_value="ready"
+            ) as mock_ensure, patch(
+                "core.maintenance.git_ops.checkout_branch", return_value="ready"
+            ) as mock_checkout, patch(
+                "core.maintenance.git_ops.pull_ff_only", return_value="pulled"
+            ), patch(
+                "core.maintenance.git_ops.run_maintenance_auto_commit",
+                return_value={"committed": 1, "pushed": 1},
+            ) as mock_commit, patch(
+                "core.maintenance.git_ops.run_maintenance_promote_to_base",
+                return_value="executed",
+            ) as mock_promote:
+                status = run_renovate_onboarding_workflow(
+                    tmp_dir,
+                    "riftvision",
+                    report,
+                    target_console=test_console,
+                )
+
+            self.assertEqual(status, "completed")
+            mock_ensure.assert_called_once_with(tmp_dir, "riftvision", "staging")
+            mock_checkout.assert_called_once_with(tmp_dir, "riftvision", "staging")
+            mock_commit.assert_called_once()
+            mock_promote.assert_called_once()
+            self.assertTrue((root / "renovate.json").is_file())
+            written = json.loads((root / "renovate.json").read_text(encoding="utf-8"))
+            self.assertIn("github>nlabrazi/dev-platform//configs/renovate/base", written["extends"])
+            self.assertEqual(written["npmrc"], "@nlabrazi:registry=https://npm.pkg.github.com/")
+
 
 class ProductionInspectionTests(unittest.TestCase):
     def tearDown(self) -> None:
@@ -1020,8 +1091,8 @@ class MaintenanceSessionResumeTests(unittest.TestCase):
             )
             self.assertEqual(save_status, "saved")
             rec_choice, rec_desc = get_resume_recommendation(journal1)
-            self.assertEqual(rec_choice, "4")
-            self.assertIn("migration changes", rec_desc)
+            self.assertEqual(rec_choice, "1")
+            self.assertIn("Renovate", rec_desc)
 
             _, journal2 = record_maintenance_step(
                 tmp_dir,
@@ -1036,7 +1107,7 @@ class MaintenanceSessionResumeTests(unittest.TestCase):
             self.assertEqual(loaded.current_stage, "prepare_changes")
             self.assertEqual(len(loaded.completed_steps), 2)
             rec_choice2, _ = get_resume_recommendation(loaded)
-            self.assertEqual(rec_choice2, "5")
+            self.assertEqual(rec_choice2, "2")
 
             buffer = io.StringIO()
             test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
@@ -1044,7 +1115,29 @@ class MaintenanceSessionResumeTests(unittest.TestCase):
             rendered = buffer.getvalue()
             self.assertIn("Resume Guide", rendered)
             self.assertIn("prepare_changes", rendered)
-            self.assertIn("menu [5]", rendered)
+            self.assertIn("menu [2]", rendered)
+
+    def test_guided_pr_bump_workflow_merges_validates_and_promotes(self) -> None:
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "renovate.json").write_text(
+                json.dumps({"extends": ["github>nlabrazi/dev-platform//configs/renovate/base"]}),
+                encoding="utf-8",
+            )
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch("core.maintenance.detector.git_output", return_value="staging"), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", return_value=empty_gh):
+                report = audit_repository(tmp_dir, "sjvtdm", include_ollama_analysis=False)
+
+            self.assertEqual(
+                run_guided_pr_bump_workflow(tmp_dir, "sjvtdm", report, target_console=test_console),
+                "no-prs",
+            )
 
 
 if __name__ == "__main__":

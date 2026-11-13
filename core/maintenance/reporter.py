@@ -69,6 +69,159 @@ def _drift_badge(drift: str) -> str:
     return f"[{style}]{drift}[/]"
 
 
+def format_pr_decision_badge(pr: RenovatePRInfo) -> str:
+    analysis = pr.analysis
+    if pr.ci_status == STATUS_FAIL or (analysis and analysis.risk_level == RISK_BLOCKED):
+        return "[bold red]🔴 BLOQUÉ (CI FAIL)[/]"
+    if analysis and (analysis.breaking_change or analysis.risk_level == RISK_BREAKING):
+        return "[bold red]🔴 BREAKING CHANGE[/]"
+    if pr.is_onboarding:
+        return "[bold yellow]🟡 ONBOARDING RENOVATE[/]"
+    if analysis and analysis.risk_level == RISK_LOW and pr.ci_status == STATUS_PASS:
+        return "[bold green]🟢 AUCUN RISQUE (SAFE TO BUMP)[/]"
+    return "[bold yellow]🟡 À VÉRIFIER[/]"
+
+
+def render_project_dashboard(report: AuditReport, *, target_console: Console | None = None) -> None:
+    out = target_console or console
+    gs = report.git_state
+    rc = report.renovate_config
+    db = report.dashboard
+
+    branch_state = "[green]propre[/]" if gs.is_clean else f"[yellow]modifié ({gs.staged_count + gs.unstaged_count} mod, {gs.untracked_count} untracked)[/]"
+    if not rc.exists:
+        renovate_state = "[bold red]❌ Non configuré (renovate.json absent)[/]"
+    elif not rc.valid_json:
+        renovate_state = "[bold red]❌ JSON invalide[/]"
+    elif rc.extends_dev_platform:
+        renovate_state = "[bold green]✅ Actif (preset Dev Platform)[/]"
+    else:
+        renovate_state = "[bold yellow]🟡 Config locale (sans preset Dev Platform)[/]"
+
+    ci_parts = [f"GitHub Actions {_status_badge(report.ci_summary.github_actions_status)}"]
+    if report.ci_summary.jenkins_file:
+        ci_parts.append(f"Jenkins {_status_badge(report.ci_summary.jenkins_status)}")
+
+    runtime_parts: list[str] = []
+    for row in report.env_matrix:
+        known = [
+            f"{label} {val}"
+            for label, val in (
+                ("Local", row.local),
+                ("GHA", row.github_actions),
+                ("Jenkins", row.jenkins),
+                ("Docker", row.docker),
+                ("Prod", row.production),
+            )
+            if val not in {"UNKNOWN", "N/A", ""}
+        ]
+        versions_summary = ", ".join(known) if known else "UNKNOWN"
+        if row.drift_status == DRIFT_ALIGNED:
+            icon = "[green]🟢 Aligné[/]"
+        elif row.drift_status == DRIFT_ACCEPTED:
+            icon = "[cyan]🔵 Écart DB accepté[/]"
+        elif row.drift_status == DRIFT_PROBLEMATIC:
+            icon = "[bold red]🔴 Désaligné[/]"
+        else:
+            icon = "[dim]⚪ Partiel[/]"
+        runtime_parts.append(f"• [bold]{row.component}[/] : {versions_summary} ({icon})")
+
+    state_lines = [
+        f"[bold white]Branche :[/] [cyan]{gs.branch}[/] ({branch_state}, base: {gs.base_branch or 'master'})  [dim]|[/]  [bold white]Renovate :[/] {renovate_state}",
+        f"[bold white]CI      :[/] {'  ·  '.join(ci_parts)}",
+    ]
+    if runtime_parts:
+        state_lines.append("[bold white]Runtimes:[/]\n" + "\n".join(runtime_parts))
+
+    out.print(
+        ui_panel(
+            "\n".join(state_lines),
+            title=f"📦 {report.repo_name} · État du Projet",
+            tone="success" if (rc.exists and rc.extends_dev_platform) else "warning",
+        )
+    )
+
+    pr_lines: list[str] = []
+    if report.open_prs:
+        for pr in report.open_prs:
+            badge = format_pr_decision_badge(pr)
+            pkg_summary = (
+                ", ".join(f"{u.package} ({u.from_version} → {u.to_version})" for u in pr.updates)
+                if pr.updates
+                else pr.title
+            )
+            verdict = ""
+            if pr.analysis:
+                verdict = pr.analysis.breaking_summary if pr.analysis.breaking_change else (pr.analysis.verdict or pr.analysis.summary)
+            pr_lines.append(
+                f"[bold cyan]#{pr.number}[/]  {badge}  [bold white]{pkg_summary}[/]  [dim]({pr.head_branch} → {pr.base_branch}, CI: {pr.ci_status})[/]"
+            )
+            if verdict:
+                pr_lines.append(f"   [dim]↳ {verdict}[/]")
+    else:
+        if db.pending_or_rate_limited_items:
+            pr_lines.append(
+                f"🟡 Aucune PR ouverte, mais [bold]{len(db.pending_or_rate_limited_items)}[/] mise(s) à jour en attente sur le Dependency Dashboard (#{db.issue_number or '?'})."
+            )
+        else:
+            dash_note = f" (Dashboard #{db.issue_number} à jour)" if db.issue_number else ""
+            pr_lines.append(f"[bold green]✅ Aucune PR Renovate ouverte{dash_note} — rien à bumper.[/]")
+
+    pr_tone = "info"
+    if any(pr.ci_status == STATUS_FAIL or (pr.analysis and pr.analysis.breaking_change) for pr in report.open_prs):
+        pr_tone = "danger"
+    elif not report.open_prs:
+        pr_tone = "success"
+
+    out.print(
+        ui_panel(
+            "\n".join(pr_lines),
+            title="🎯 PRs Renovate & Décisions de Bump",
+            tone=pr_tone,
+            compact=True,
+        )
+    )
+
+    action_items: list[str] = []
+    if not rc.exists or not rc.extends_dev_platform:
+        action_items.append("🚀 [bold]Renovate à déployer/aligner[/] : utilisez l'action [bold cyan][1][/] pour configurer le preset Dev Platform.")
+    for row in report.env_matrix:
+        if row.drift_status == DRIFT_PROBLEMATIC:
+            action_items.append(f"🔴 [bold]Désalignement {row.component}[/] : {row.drift_details} (corrigeable via l'action [bold cyan][1][/]).")
+    if gs.venv_exists and gs.venv_has_pip is False and any("pip install" in r for r in report.reservations):
+        action_items.append("🔴 [bold]Script deploy.sh incompatible[/] : remplacer 'pip install' par 'uv pip install' (action [bold cyan][1][/]).")
+    if gs.untracked_venv_entries:
+        action_items.append(f"🟡 [bold]Virtualenv non ignoré[/] : exclure {', '.join(gs.untracked_venv_entries)} dans .git/info/exclude (action [bold cyan][1][/]).")
+    if report.open_prs:
+        action_items.append(f"⚡ [bold]{len(report.open_prs)} PR(s) Renovate à traiter[/] : utilisez l'action [bold cyan][2][/] pour analyser et merger.")
+    for st in report.stacks:
+        if st.ecosystem == "python" and st.unpinned_dependencies:
+            sample = ", ".join(st.unpinned_dependencies[:5])
+            more = f" (+{len(st.unpinned_dependencies) - 5})" if len(st.unpinned_dependencies) > 5 else ""
+            action_items.append(
+                f"ℹ️  [bold]{len(st.unpinned_dependencies)} dépendance(s) Python non épinglée(s)[/] ({sample}{more}) dans {', '.join(st.files)}."
+            )
+
+    if action_items:
+        out.print(
+            ui_panel(
+                "\n".join(f"• {item}" for item in action_items),
+                title="💡 Que faut-il faire sur ce projet ?",
+                tone="warning",
+                compact=True,
+            )
+        )
+    else:
+        out.print(
+            ui_panel(
+                "[bold green]✅ Tout est propre et aligné sur ce dépôt. Aucune action requise.[/]",
+                title="💡 Que faut-il faire sur ce projet ?",
+                tone="success",
+                compact=True,
+            )
+        )
+
+
 def render_renovate_pr_analysis(pr: RenovatePRInfo, *, target_console: Console | None = None) -> None:
     out = target_console or console
     analysis = pr.analysis
@@ -216,7 +369,7 @@ def render_audit_report(report: AuditReport, *, target_console: Console | None =
 
     matrix_table = ui_table(
         title="4 · Environment Version Matrix",
-        caption="Production stays UNKNOWN in Phase 1 unless explicitly configured. Version differences in DB are evaluated without forced upgrades.",
+        caption="Les écarts de version PostgreSQL sont évalués sans mise à jour forcée du serveur DB.",
         show_lines=True,
     )
     matrix_table.add_column("Component", style="bold white", no_wrap=True)
@@ -284,11 +437,6 @@ def render_audit_report(report: AuditReport, *, target_console: Console | None =
             )
         )
 
-    if report.risk_assessments:
-        render_risk_assessments(report.risk_assessments, target_console=out)
-    if report.migration_plan is not None:
-        render_migration_plan(report.migration_plan, target_console=out)
-
     out.print(
         ui_panel(
             format_executive_summary_text(report),
@@ -306,33 +454,31 @@ def render_risk_assessments(
     out = target_console or console
     table = ui_table(
         title="6 · Risk Classification & Target Versions",
-        caption="Recommendations include their sources and known uncertainties.",
+        caption="Vue synthétique des risques, versions cibles et recommandations.",
         show_lines=True,
     )
-    table.add_column("Subject", style="bold white")
-    table.add_column("Current → Proposed", justify="center")
-    table.add_column("Target", justify="center", style="cyan")
-    table.add_column("Risk", justify="center", no_wrap=True)
-    table.add_column("Recommendation, Sources & Uncertainties", style="white")
+    table.add_column("Sujet & Versions", style="bold white")
+    table.add_column("Risque", justify="center", no_wrap=True)
+    table.add_column("Décision & Fichiers", style="white")
 
     if not assessments:
-        table.add_row("(none)", "-", "-", _risk_badge(RISK_LOW), "No update or alignment risk identified.")
+        table.add_row("(aucun)", _risk_badge(RISK_LOW), "Aucun risque identifié.")
         out.print(table)
         return
 
     for item in assessments:
+        subject_cell = (
+            f"[bold white]{item.subject}[/]\n"
+            f"[dim]{item.current_version} →[/] [cyan]{item.target_version}[/]"
+        )
         details_lines = [item.recommendation]
         if item.affected_files:
-            details_lines.append(f"[bold yellow]Files:[/] {', '.join(item.affected_files)}")
-        if item.sources:
-            details_lines.append(f"[dim]Sources: {'; '.join(item.sources[:3])}[/]")
-        if item.uncertainties:
-            details_lines.append(f"[yellow]Uncertainties: {'; '.join(item.uncertainties[:2])}[/]")
+            details_lines.append(f"[bold yellow]Fichiers :[/] {', '.join(item.affected_files)}")
+        if item.breaking_change:
+            details_lines.append("[bold red]⚠️ Breaking change détecté[/]")
 
         table.add_row(
-            item.subject,
-            f"{item.current_version} → {item.proposed_version}",
-            item.target_version,
+            subject_cell,
             _risk_badge(item.risk_level),
             "\n".join(details_lines),
         )
