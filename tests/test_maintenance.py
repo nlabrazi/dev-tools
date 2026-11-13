@@ -35,18 +35,22 @@ from core.maintenance import (
     format_report_json,
     format_report_markdown,
     generate_migration_plan,
+    get_resume_recommendation,
     inspect_dependency_dashboard,
     inspect_git_state,
     inspect_production_environment,
     inspect_renovate_config,
+    load_maintenance_journal,
     merge_renovate_pr_to_staging,
     parse_dashboard_pending_update,
     parse_python_test_output,
     parse_renovate_pr_body,
     prepare_deployment_and_rollback,
     prepare_migration_changes,
+    record_maintenance_step,
     render_audit_report,
     render_deployment_checklist,
+    render_maintenance_journal,
     render_migration_application_result,
     render_migration_plan,
     render_post_deploy_verification,
@@ -980,6 +984,67 @@ class DeploymentAndRollbackChecksTests(unittest.TestCase):
             rendered = buffer.getvalue()
             self.assertIn("BLOCKED", rendered)
             self.assertIn("PENDING VERIFICATION", rendered)
+
+
+class MaintenanceSessionResumeTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_dry_run(False)
+
+    def test_journal_tracks_and_resumes_operations_and_respects_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / ".git").mkdir()
+
+            # Dry-run does not write journal file
+            set_dry_run(True)
+            dry_status, _ = record_maintenance_step(
+                tmp_dir,
+                "sjvtdm",
+                "audit",
+                "ACTION REQUIRED",
+                details="1 open PR",
+                pending_actions=["Align Jenkinsfile Python version"],
+            )
+            self.assertEqual(dry_status, "dry-run")
+            self.assertIsNone(load_maintenance_journal(tmp_dir, "sjvtdm"))
+
+            # Prod writes journal inside .git/devtools-maintenance-journal.json
+            set_dry_run(False)
+            save_status, journal1 = record_maintenance_step(
+                tmp_dir,
+                "sjvtdm",
+                "audit",
+                "ACTION REQUIRED",
+                details="1 open PR",
+                pending_actions=["Align Jenkinsfile Python version"],
+            )
+            self.assertEqual(save_status, "saved")
+            rec_choice, rec_desc = get_resume_recommendation(journal1)
+            self.assertEqual(rec_choice, "4")
+            self.assertIn("migration changes", rec_desc)
+
+            _, journal2 = record_maintenance_step(
+                tmp_dir,
+                "sjvtdm",
+                "prepare_changes",
+                "APPLIED",
+                details="Jenkinsfile",
+            )
+            loaded = load_maintenance_journal(tmp_dir, "sjvtdm")
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(loaded.current_stage, "prepare_changes")
+            self.assertEqual(len(loaded.completed_steps), 2)
+            rec_choice2, _ = get_resume_recommendation(loaded)
+            self.assertEqual(rec_choice2, "5")
+
+            buffer = io.StringIO()
+            test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+            render_maintenance_journal(loaded, target_console=test_console)
+            rendered = buffer.getvalue()
+            self.assertIn("Resume Guide", rendered)
+            self.assertIn("prepare_changes", rendered)
+            self.assertIn("menu [5]", rendered)
 
 
 if __name__ == "__main__":

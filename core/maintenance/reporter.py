@@ -16,6 +16,7 @@ from core.maintenance.models import (
     STATUS_PENDING,
     AuditReport,
     DeploymentChecklist,
+    MaintenanceSessionJournal,
     MigrationApplicationResult,
     MigrationPlan,
     PostDeployVerificationReport,
@@ -25,6 +26,7 @@ from core.maintenance.models import (
     UpdateRiskAssessment,
     ValidationReport,
 )
+from core.maintenance.journal import get_resume_recommendation
 from utils.common import is_dry_run
 from utils.console import ui_panel, ui_table
 
@@ -595,6 +597,41 @@ def render_post_deploy_verification(
 
     tone = "success" if report.overall_status == "VERIFIED IN PRODUCTION" else ("danger" if report.overall_status == STATUS_FAIL else "warning")
     out.print(ui_panel("\n".join(lines), title="Post-Deployment & Sentinel Verification", tone=tone))
+
+
+def render_maintenance_journal(
+    journal: MaintenanceSessionJournal,
+    *,
+    target_console: Console | None = None,
+) -> None:
+    out = target_console or console
+    rec_key, rec_desc = get_resume_recommendation(journal)
+    lines = [
+        f"[bold white]Repository:[/] [cyan]{journal.repo_name}[/]  [dim]|[/]  [bold white]Last updated:[/] {journal.updated_at}",
+        f"[bold white]Last completed stage:[/] [bold yellow]{journal.current_stage}[/]  [dim]|[/]  [bold white]Session complete:[/] {'YES' if journal.is_complete else 'NO'}",
+    ]
+    if journal.completed_steps:
+        recent = journal.completed_steps[-4:]
+        lines.append("")
+        lines.append("[bold cyan]Recent Operations:[/]")
+        for entry in recent:
+            detail_suffix = f" — {entry.details}" if entry.details else ""
+            lines.append(f"- [{entry.timestamp}] [bold]{entry.step}[/] ({entry.status}){detail_suffix}")
+    if journal.pending_actions:
+        lines.append("")
+        lines.append("[bold yellow]Pending Actions / Reservations:[/]")
+        for item in journal.pending_actions[:5]:
+            lines.append(f"- {item}")
+    lines.append("")
+    lines.append(f"[bold green]Recommended next action (menu [{rec_key}]):[/] {rec_desc}")
+
+    out.print(
+        ui_panel(
+            "\n".join(lines),
+            title="Interrupted Maintenance Session Detected · Resume Guide",
+            tone="info" if journal.is_complete else "warning",
+        )
+    )
 
 
 

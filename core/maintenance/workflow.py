@@ -15,6 +15,10 @@ from core.maintenance.git_ops import (
     run_maintenance_auto_commit,
     run_maintenance_promote_to_base,
 )
+from core.maintenance.journal import (
+    load_maintenance_journal,
+    record_maintenance_step,
+)
 from core.maintenance.migrator import (
     apply_migration_changes,
     prepare_migration_changes,
@@ -42,6 +46,7 @@ from core.maintenance.renovate import (
 from core.maintenance.reporter import (
     render_audit_report,
     render_deployment_checklist,
+    render_maintenance_journal,
     render_migration_application_result,
     render_migration_plan,
     render_post_deploy_verification,
@@ -228,6 +233,9 @@ def ask_maintenance_action() -> str:
 
 def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
     last_report: AuditReport | None = None
+    existing_journal = load_maintenance_journal(repo_path, repo_name)
+    if existing_journal is not None and not existing_journal.is_complete:
+        render_maintenance_journal(existing_journal, target_console=console)
 
     while True:
         render_maintenance_menu(repo_name)
@@ -239,6 +247,14 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
             with console.status(f"[bold cyan]Running read-only maintenance audit on {repo_name}...[/]", spinner="dots"):
                 last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=True)
             render_audit_report(last_report, target_console=console)
+            record_maintenance_step(
+                repo_path,
+                repo_name,
+                "audit",
+                last_report.overall_status,
+                details=f"{len(last_report.open_prs)} open PR(s)",
+                pending_actions=last_report.reservations,
+            )
             if ask_yes_no("Export this audit report to JSON and Markdown?", default="n"):
                 status, paths = save_audit_report(last_report)
                 tone = "success" if status == "saved" else "info"
@@ -296,6 +312,14 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
             render_risk_assessments(last_report.risk_assessments, target_console=console)
             if last_report.migration_plan is not None:
                 render_migration_plan(last_report.migration_plan, target_console=console)
+            record_maintenance_step(
+                repo_path,
+                repo_name,
+                "plan",
+                "PLANNED",
+                details=f"{len(last_report.risk_assessments)} risk item(s) analyzed",
+                pending_actions=last_report.reservations,
+            )
             continue
 
         if choice == "4":
@@ -318,6 +342,14 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
             if proposals and ask_yes_no("Apply these controlled migration changes locally?", default="n"):
                 app_result = apply_migration_changes(repo_path, proposals)
                 render_migration_application_result(app_result, target_console=console)
+                record_maintenance_step(
+                    repo_path,
+                    repo_name,
+                    "prepare_changes",
+                    app_result.status.upper(),
+                    details=", ".join(app_result.applied_files),
+                    pending_actions=last_report.reservations,
+                )
             continue
 
         if choice == "5":
@@ -328,6 +360,14 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
             with console.status(f"[bold cyan]Running migration validations on {repo_name}...[/]", spinner="dots"):
                 val_report = run_migration_validations(last_report, execute_local_tests=run_tests)
             render_validation_report(val_report, target_console=console)
+            record_maintenance_step(
+                repo_path,
+                repo_name,
+                "validate",
+                val_report.overall_status,
+                details=f"PASS={val_report.counts_by_status.get('PASS', 0)}, SKIPPED={val_report.counts_by_status.get('SKIPPED', 0)}",
+                pending_actions=val_report.reservations,
+            )
             continue
 
         if choice == "6":
@@ -342,6 +382,7 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
             ).lower()
             if git_action == "1":
                 run_maintenance_auto_commit(repo_path, repo_name, target_console=console)
+                record_maintenance_step(repo_path, repo_name, "git_workflow", "AUTO_COMMIT", details="Auto-commit on staging")
             elif git_action == "2":
                 if not last_report.open_prs:
                     console.print(
@@ -360,8 +401,10 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
                             pr,
                             target_console=console,
                         )
+                    record_maintenance_step(repo_path, repo_name, "git_workflow", "RENOVATE_PR_MERGE", details="Processed open Renovate PR(s)")
             elif git_action == "3":
                 run_maintenance_promote_to_base(repo_path, repo_name, target_console=console)
+                record_maintenance_step(repo_path, repo_name, "git_workflow", "PROMOTE_TO_BASE", details="Promoted staging to base branch")
             continue
 
         if choice == "7":
@@ -382,6 +425,15 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
                 sentinel_cron_verified=sentinel_ok,
             )
             render_post_deploy_verification(post_report, target_console=console)
+            record_maintenance_step(
+                repo_path,
+                repo_name,
+                "production_check",
+                post_report.overall_status,
+                details=f"Scheduled jobs: {post_report.scheduled_jobs_status}",
+                pending_actions=post_report.notes,
+                is_complete=sentinel_ok and checklist.ready_to_deploy,
+            )
             continue
 
         if choice == "8":
@@ -389,6 +441,13 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
                 with console.status(f"[bold cyan]Running audit on {repo_name} before export...[/]", spinner="dots"):
                     last_report = audit_repository(repo_path, repo_name, include_ollama_analysis=True)
             status, paths = save_audit_report(last_report)
+            record_maintenance_step(
+                repo_path,
+                repo_name,
+                "export",
+                status.upper(),
+                details=", ".join(paths),
+            )
             tone = "success" if status == "saved" else "info"
             label = "Saved report files" if status == "saved" else "Dry-run simulation (no files written)"
             console.print(

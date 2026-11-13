@@ -334,6 +334,31 @@ class PostDeployVerificationReport:
 
 
 @dataclass(frozen=True)
+class MaintenanceOperationEntry:
+    step: str
+    status: str
+    timestamp: str
+    details: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class MaintenanceSessionJournal:
+    repo_name: str
+    repo_path: str
+    updated_at: str
+    current_stage: str
+    completed_steps: list[MaintenanceOperationEntry] = field(default_factory=list)
+    pending_actions: list[str] = field(default_factory=list)
+    is_complete: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class AuditReport:
     repo_name: str
     repo_path: str
