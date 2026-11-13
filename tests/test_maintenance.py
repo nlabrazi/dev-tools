@@ -67,6 +67,7 @@ from core.maintenance import (
     run_renovate_onboarding_workflow,
     save_audit_report,
     summarize_risk_assessments,
+    sync_local_branch_ff_only,
     verify_migration_git_preconditions,
     verify_post_deployment,
 )
@@ -809,11 +810,71 @@ class MaintenanceGitWorkflowIntegrationTests(unittest.TestCase):
         ok_proc = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="Merged\n", stderr="")
         with patch("core.maintenance.git_ops.ask_yes_no", side_effect=[True, True]), patch(
             "core.maintenance.git_ops.run_command", return_value=ok_proc
-        ) as mock_run, patch("core.maintenance.git_ops.pull_ff_only", return_value="pulled") as mock_pull:
+        ) as mock_run, patch(
+            "core.maintenance.git_ops.git_output", return_value="staging"
+        ), patch("core.maintenance.git_ops.pull_ff_only", return_value="pulled") as mock_pull:
             prod_status = merge_renovate_pr_to_staging("/tmp/repo", "repo", passing_pr, target_console=test_console)
         self.assertEqual(prod_status, "merged")
         mock_run.assert_called_once()
         mock_pull.assert_called_once_with("/tmp/repo", "repo", "staging")
+
+    def test_sync_local_branch_ff_only_handles_master_checkout_and_fallback_fetch(self) -> None:
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+
+        # Case 1: repo is on master -> switches to staging and pulls fast-forward
+        with patch("core.maintenance.git_ops.git_output", return_value="master"), patch(
+            "core.maintenance.git_ops.ensure_local_branch_exists", return_value="ready"
+        ) as mock_ensure, patch(
+            "core.maintenance.git_ops.checkout_branch", return_value="ready"
+        ) as mock_checkout, patch(
+            "core.maintenance.git_ops.pull_ff_only", return_value="pulled"
+        ) as mock_pull:
+            res = sync_local_branch_ff_only("/tmp/repo", "repo", "staging", target_console=test_console)
+        self.assertEqual(res, "pulled")
+        mock_ensure.assert_called_once_with("/tmp/repo", "repo", "staging")
+        mock_checkout.assert_called_once_with("/tmp/repo", "repo", "staging")
+        mock_pull.assert_called_once_with("/tmp/repo", "repo", "staging")
+
+        # Case 2: repo is on master and checkout fails (e.g. dirty tree) -> falls back to git fetch origin staging:staging
+        ok_fetch = subprocess.CompletedProcess(args=["git"], returncode=0, stdout="", stderr="")
+        with patch("core.maintenance.git_ops.git_output", return_value="master"), patch(
+            "core.maintenance.git_ops.ensure_local_branch_exists", return_value="ready"
+        ), patch(
+            "core.maintenance.git_ops.checkout_branch", return_value="failed"
+        ), patch("core.maintenance.git_ops.git_command", return_value=ok_fetch) as mock_fetch:
+            res_fallback = sync_local_branch_ff_only("/tmp/repo", "repo", "staging", target_console=test_console)
+        self.assertEqual(res_fallback, "pulled")
+        mock_fetch.assert_called_once_with(
+            "/tmp/repo",
+            ["fetch", "origin", "staging:staging"],
+            silent=True,
+        )
+        self.assertIn("Fast-Forward Sync", buffer.getvalue())
+
+    def test_audit_repository_invokes_progress_callback(self) -> None:
+        steps: list[tuple[int, str]] = []
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "renovate.json").write_text(
+                json.dumps({"extends": ["github>nlabrazi/dev-platform//configs/renovate/base"]}),
+                encoding="utf-8",
+            )
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch("core.maintenance.detector.git_output", return_value="staging"), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", return_value=empty_gh):
+                audit_repository(
+                    tmp_dir,
+                    "sawt-ai",
+                    include_ollama_analysis=False,
+                    progress_callback=lambda step, msg: steps.append((step, msg)),
+                )
+        self.assertGreaterEqual(len(steps), 5)
+        self.assertEqual([s[0] for s in steps[:5]], [1, 2, 3, 4, 5])
+        self.assertTrue(any("1/5" in msg for _, msg in steps))
+        self.assertTrue(any("5/5" in msg for _, msg in steps))
 
     def test_delegates_to_commit_and_merge_workflows_with_safety_checks(self) -> None:
         buffer = io.StringIO()

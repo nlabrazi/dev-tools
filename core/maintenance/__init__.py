@@ -19,6 +19,7 @@ from core.maintenance.git_ops import (
     run_maintenance_auto_commit,
     run_maintenance_promote_to_base,
     run_renovate_onboarding_workflow,
+    sync_local_branch_ff_only,
 )
 from core.maintenance.journal import (
     get_resume_recommendation,
@@ -214,6 +215,7 @@ __all__ = [
     "save_audit_report",
     "save_maintenance_journal",
     "summarize_risk_assessments",
+    "sync_local_branch_ff_only",
     "verify_migration_git_preconditions",
     "verify_post_deployment",
 ]

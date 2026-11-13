@@ -3,7 +3,7 @@ from pathlib import Path
 from rich.console import Console
 
 from core.commit import auto_commit_all_repos
-from core.config import DEFAULT_HEAD_BRANCH
+from core.config import DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE
 from core.maintenance.detector import inspect_git_state
 from core.maintenance.migrator import (
     apply_migration_changes,
@@ -23,8 +23,97 @@ from core.merge import main as merge_all_repos
 from core.sync import checkout_branch, ensure_local_branch_exists, pull_ff_only
 from utils.common import is_dry_run, run_command
 from utils.console import ask_yes_no, ui_panel
+from utils.git import git_command, git_output
 
 console = Console()
+
+
+def sync_local_branch_ff_only(
+    repo_path: str,
+    repo_name: str,
+    branch: str,
+    *,
+    target_console: Console | None = None,
+) -> str:
+    out = target_console or console
+    if is_dry_run():
+        out.print()
+        out.print(
+            ui_panel(
+                f"Dry-run: would fast-forward local branch '{branch}' from {DEFAULT_REMOTE}/{branch}.",
+                title="Fast-Forward Sync (Dry-Run)",
+                tone="info",
+                compact=True,
+            )
+        )
+        return "dry-run"
+
+    current_branch = git_output(repo_path, ["branch", "--show-current"])
+    switched_from: str | None = None
+
+    if current_branch and current_branch != branch:
+        if (
+            ensure_local_branch_exists(repo_path, repo_name, branch) == "ready"
+            and checkout_branch(repo_path, repo_name, branch) == "ready"
+        ):
+            switched_from = current_branch
+        else:
+            fetch_res = git_command(
+                repo_path,
+                ["fetch", DEFAULT_REMOTE, f"{branch}:{branch}"],
+                silent=True,
+            )
+            out.print()
+            if fetch_res.returncode == 0:
+                out.print(
+                    ui_panel(
+                        (
+                            f"Branche locale '{branch}' mise à jour en fast-forward depuis {DEFAULT_REMOTE}/{branch} "
+                            f"(branche active conservée : '{current_branch}')."
+                        ),
+                        title="Fast-Forward Sync",
+                        tone="success",
+                        compact=True,
+                    )
+                )
+                return "pulled"
+            err = (fetch_res.stderr or fetch_res.stdout or "").strip() or f"exit code {fetch_res.returncode}"
+            out.print(
+                ui_panel(
+                    f"Impossible de mettre à jour '{branch}' en fast-forward depuis '{current_branch}' :\n{err}",
+                    title="Fast-Forward Sync Failed",
+                    tone="warning",
+                    compact=True,
+                )
+            )
+            return "failed"
+
+    pull_status = pull_ff_only(repo_path, repo_name, branch)
+    out.print()
+    if pull_status == "pulled":
+        switch_note = f" (basculé depuis '{switched_from}')" if switched_from else ""
+        out.print(
+            ui_panel(
+                f"Branche locale '{branch}' synchronisée en fast-forward avec {DEFAULT_REMOTE}/{branch}{switch_note}.",
+                title="Fast-Forward Sync",
+                tone="success",
+                compact=True,
+            )
+        )
+        return "pulled"
+
+    if pull_status == "dry-run":
+        return "dry-run"
+
+    out.print(
+        ui_panel(
+            f"Le fast-forward de '{branch}' depuis {DEFAULT_REMOTE}/{branch} a échoué (vérifiez l'état local de la branche).",
+            title="Fast-Forward Sync Failed",
+            tone="warning",
+            compact=True,
+        )
+    )
+    return "failed"
 
 
 def merge_renovate_pr_to_staging(
@@ -73,13 +162,16 @@ def merge_renovate_pr_to_staging(
         )
         return "blocked"
 
+    out.print()
     if not ask_yes_no(
         f"Merge Renovate PR #{pr.number} ({pr.title}) into {pr.base_branch}?",
         default="n",
     ):
+        out.print()
         return "skipped"
 
     if is_dry_run():
+        out.print()
         out.print(
             ui_panel(
                 f"Dry-run: would merge PR #{pr.number} ({pr.head_branch} → {pr.base_branch}) in {repo_name}.",
@@ -88,6 +180,7 @@ def merge_renovate_pr_to_staging(
                 compact=True,
             )
         )
+        out.print()
         return "dry-run"
 
     res = run_command(
@@ -97,6 +190,7 @@ def merge_renovate_pr_to_staging(
     )
     if res.returncode != 0:
         details = ((res.stderr or "") + "\n" + (res.stdout or "")).strip() or f"exit code {res.returncode}"
+        out.print()
         out.print(
             ui_panel(
                 f"Failed to merge PR #{pr.number}:\n{details}",
@@ -105,8 +199,10 @@ def merge_renovate_pr_to_staging(
                 compact=True,
             )
         )
+        out.print()
         return "failed"
 
+    out.print()
     out.print(
         ui_panel(
             f"Merged PR #{pr.number} ({pr.title}) into {pr.base_branch}.",
@@ -117,8 +213,10 @@ def merge_renovate_pr_to_staging(
     )
 
     if sync_after_merge and pr.base_branch == DEFAULT_HEAD_BRANCH:
+        out.print()
         if ask_yes_no(f"Pull fast-forward {pr.base_branch} locally after merging PR #{pr.number}?", default="y"):
-            pull_ff_only(repo_path, repo_name, pr.base_branch)
+            sync_local_branch_ff_only(repo_path, repo_name, pr.base_branch, target_console=out)
+        out.print()
 
     return "merged"
 
