@@ -1,9 +1,12 @@
+import json
+import re
 from pathlib import Path
 
 from rich.console import Console
 
 from core.commit import auto_commit_all_repos
 from core.config import DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE
+from core.maintenance.analyzer import parse_dashboard_pending_update
 from core.maintenance.detector import inspect_git_state
 from core.maintenance.migrator import (
     apply_migration_changes,
@@ -12,9 +15,12 @@ from core.maintenance.migrator import (
 from core.maintenance.models import (
     RISK_BLOCKED,
     STATUS_FAIL,
+    STATUS_UNKNOWN,
     AuditReport,
     RenovatePRInfo,
+    RenovateUpdateItem,
 )
+from core.maintenance.renovate import infer_semver_update_type
 from core.maintenance.reporter import (
     render_migration_application_result,
     render_proposed_changes_preview,
@@ -378,3 +384,211 @@ def run_renovate_onboarding_workflow(
         run_maintenance_promote_to_base(repo_path, repo_name, target_console=out)
 
     return "dry-run" if is_dry_run() else "completed"
+
+
+def collect_direct_staging_updates(
+    repo_path: str,
+    report: AuditReport,
+    *,
+    include_npm_outdated: bool = True,
+) -> list[RenovateUpdateItem]:
+    updates_by_pkg: dict[str, RenovateUpdateItem] = {}
+
+    raw_dashboard_items = list(report.dashboard.pending_or_rate_limited_items) + list(report.dashboard.open_items)
+    for raw_item in raw_dashboard_items:
+        pkg, from_ver, to_ver, upd_type = parse_dashboard_pending_update(raw_item)
+        if not pkg or to_ver == STATUS_UNKNOWN:
+            continue
+        updates_by_pkg[pkg] = RenovateUpdateItem(
+            package=pkg,
+            update_type=upd_type,
+            from_version=from_ver if from_ver != STATUS_UNKNOWN else "",
+            to_version=to_ver,
+            raw_change=f"{from_ver} -> {to_ver}" if from_ver != STATUS_UNKNOWN else f"-> {to_ver}",
+        )
+
+    if include_npm_outdated:
+        repo_root = Path(repo_path)
+        for directory in (repo_root, repo_root / "ui", repo_root / "frontend"):
+            pkg_json = directory / "package.json"
+            if not pkg_json.is_file():
+                continue
+            res = run_command(["npm", "outdated", "--json"], cwd=str(directory), silent=True)
+            raw_out = (res.stdout or "").strip()
+            if not raw_out:
+                continue
+            try:
+                parsed = json.loads(raw_out)
+            except Exception:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            for pkg, info in parsed.items():
+                if not isinstance(info, dict) or pkg in updates_by_pkg:
+                    continue
+                from_ver = str(info.get("current") or info.get("wanted") or "").strip()
+                to_ver = str(info.get("latest") or info.get("wanted") or "").strip()
+                if not to_ver or from_ver == to_ver:
+                    continue
+                upd_type = infer_semver_update_type(from_ver, to_ver) if from_ver else "unknown"
+                updates_by_pkg[pkg] = RenovateUpdateItem(
+                    package=pkg,
+                    update_type=upd_type,
+                    from_version=from_ver,
+                    to_version=to_ver,
+                    raw_change=f"{from_ver} -> {to_ver}" if from_ver else f"-> {to_ver}",
+                )
+
+    return list(updates_by_pkg.values())
+
+
+def apply_direct_staging_updates(
+    repo_path: str,
+    repo_name: str,
+    updates: list[RenovateUpdateItem],
+    *,
+    target_console: Console | None = None,
+) -> str:
+    out = target_console or console
+    if not updates:
+        return "no-op"
+
+    git_state = inspect_git_state(repo_path)
+    if git_state.branch != DEFAULT_HEAD_BRANCH:
+        if git_state.staged_count > 0 or git_state.unstaged_count > 0:
+            out.print(
+                ui_panel(
+                    (
+                        f"Vous êtes sur '{git_state.branch}' avec des modifications non commitées. "
+                        f"Commitez ou stashez vos changements avant de basculer sur '{DEFAULT_HEAD_BRANCH}'."
+                    ),
+                    title="Bump Direct Bloqué · Modifications en cours",
+                    tone="danger",
+                    compact=True,
+                )
+            )
+            return "blocked"
+
+        if not ask_yes_no(
+            f"Le dépôt est sur '{git_state.branch}'. Basculer sur '{DEFAULT_HEAD_BRANCH}' et synchroniser ?",
+            default="y",
+        ):
+            return "skipped"
+
+        if ensure_local_branch_exists(repo_path, repo_name, DEFAULT_HEAD_BRANCH) == "failed":
+            return "failed"
+        if checkout_branch(repo_path, repo_name, DEFAULT_HEAD_BRANCH) == "failed":
+            return "failed"
+        pull_ff_only(repo_path, repo_name, DEFAULT_HEAD_BRANCH)
+
+    summary_lines = [f"• {u.package}: {u.from_version or '?'} → {u.to_version} ({u.update_type})" for u in updates]
+    if is_dry_run():
+        out.print()
+        out.print(
+            ui_panel(
+                f"Dry-run : mettrait à jour directement sur '{DEFAULT_HEAD_BRANCH}' dans {repo_name} :\n"
+                + "\n".join(summary_lines),
+                title="Bump Direct sur Staging (Dry-Run)",
+                tone="info",
+                compact=True,
+            )
+        )
+        return "dry-run"
+
+    repo_root = Path(repo_path)
+    applied_pkgs: list[str] = []
+
+    # 1. Apply Node/npm updates
+    for directory in (repo_root, repo_root / "ui", repo_root / "frontend"):
+        pkg_json = directory / "package.json"
+        if not pkg_json.is_file():
+            continue
+        try:
+            pkg_data = json.loads(pkg_json.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(pkg_data, dict):
+            continue
+
+        dir_changed = False
+        for section in ("dependencies", "devDependencies"):
+            deps = pkg_data.get(section)
+            if not isinstance(deps, dict):
+                continue
+            for upd in updates:
+                if upd.package in deps:
+                    current_spec = str(deps[upd.package])
+                    prefix_match = re.match(r"^([~^])", current_spec)
+                    prefix = prefix_match.group(1) if prefix_match else "^"
+                    clean_target = upd.to_version.lstrip("v^~")
+                    deps[upd.package] = f"{prefix}{clean_target}"
+                    dir_changed = True
+                    if upd.package not in applied_pkgs:
+                        applied_pkgs.append(upd.package)
+
+        if dir_changed:
+            pkg_json.write_text(json.dumps(pkg_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            res = run_command(["npm", "install"], cwd=str(directory), silent=True)
+            if res.returncode != 0:
+                details = ((res.stderr or "") + "\n" + (res.stdout or "")).strip() or f"exit code {res.returncode}"
+                out.print()
+                out.print(
+                    ui_panel(
+                        f"Échec de 'npm install' dans {directory} :\n{details}",
+                        title="Bump Direct Échoué",
+                        tone="danger",
+                        compact=True,
+                    )
+                )
+                return "failed"
+
+    # 2. Apply Python requirements*.txt updates
+    for directory in (repo_root, repo_root / "backend", repo_root / "api"):
+        if not directory.is_dir():
+            continue
+        for req_file in sorted(directory.glob("requirements*.txt")):
+            if not req_file.is_file():
+                continue
+            try:
+                content = req_file.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            new_content = content
+            for upd in updates:
+                clean_target = upd.to_version.lstrip("v^~=")
+                pattern = re.compile(
+                    rf"^(\s*{re.escape(upd.package)}\s*(?:==|>=|~=)\s*)([^\s;#]+)",
+                    re.IGNORECASE | re.MULTILINE,
+                )
+                updated_text, count = pattern.subn(rf"\g<1>{clean_target}", new_content)
+                if count > 0:
+                    new_content = updated_text
+                    if upd.package not in applied_pkgs:
+                        applied_pkgs.append(upd.package)
+            if new_content != content:
+                req_file.write_text(new_content, encoding="utf-8")
+
+    if not applied_pkgs:
+        out.print()
+        out.print(
+            ui_panel(
+                "Aucun fichier manifeste local (package.json / requirements.txt) ne correspondait aux paquets sélectionnés.",
+                title="Bump Direct sur Staging",
+                tone="warning",
+                compact=True,
+            )
+        )
+        return "no-op"
+
+    out.print()
+    out.print(
+        ui_panel(
+            f"Mis à jour directement sur '{DEFAULT_HEAD_BRANCH}' ({len(applied_pkgs)} paquet(s)) :\n"
+            + "\n".join(f"• {pkg}" for pkg in applied_pkgs),
+            title="Bump Direct Appliqué sur Staging",
+            tone="success",
+            compact=True,
+        )
+    )
+    return "applied"
+

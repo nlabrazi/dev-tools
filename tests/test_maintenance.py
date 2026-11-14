@@ -25,11 +25,13 @@ from core.maintenance import (
     RenovatePRInfo,
     RenovateUpdateItem,
     analyze_renovate_pr,
+    apply_direct_staging_updates,
     apply_migration_changes,
     audit_repository,
     build_environment_matrix,
     classify_repository_update_risks,
     collect_declared_versions,
+    collect_direct_staging_updates,
     detect_project_stacks,
     extract_release_notes_signals,
     format_pr_decision_badge,
@@ -1199,6 +1201,69 @@ class MaintenanceSessionResumeTests(unittest.TestCase):
                 run_guided_pr_bump_workflow(tmp_dir, "sjvtdm", report, target_console=test_console),
                 "no-prs",
             )
+
+    def test_direct_staging_updates_collected_and_applied_without_branches(self) -> None:
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "renovate.json").write_text(
+                json.dumps({"extends": ["github>nlabrazi/dev-platform//configs/renovate/base"]}),
+                encoding="utf-8",
+            )
+            (root / "package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "sample-app",
+                        "devDependencies": {
+                            "@nlabrazi/config-biome": "^0.2.0",
+                            "nuxt": "^4.4.2",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            dashboard_issue = [
+                {
+                    "number": 1,
+                    "title": "Dependency Dashboard",
+                    "state": "OPEN",
+                    "body": "## Pending Approval\n- [ ] Update dependency @nlabrazi/config-biome from 0.2.0 to 0.2.1\n",
+                }
+            ]
+            npm_outdated = subprocess.CompletedProcess(
+                args=["npm", "outdated", "--json"],
+                returncode=1,
+                stdout=json.dumps({"nuxt": {"current": "4.4.2", "wanted": "4.4.3", "latest": "4.4.3"}}),
+                stderr="",
+            )
+            npm_install = subprocess.CompletedProcess(args=["npm", "install"], returncode=0, stdout="", stderr="")
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            issue_gh = subprocess.CompletedProcess(
+                args=["gh"], returncode=0, stdout=json.dumps(dashboard_issue), stderr=""
+            )
+
+            with patch("core.maintenance.detector.git_output", return_value="staging"), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", side_effect=[issue_gh, empty_gh]):
+                report = audit_repository(tmp_dir, "sample-app", include_ollama_analysis=False)
+
+            with patch("core.maintenance.git_ops.run_command", return_value=npm_outdated):
+                updates = collect_direct_staging_updates(tmp_dir, report)
+            self.assertEqual([u.package for u in updates], ["@nlabrazi/config-biome", "nuxt"])
+
+            with patch("core.maintenance.detector.git_output", return_value="staging"), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.git_ops.run_command", return_value=npm_install):
+                status = apply_direct_staging_updates(tmp_dir, "sample-app", updates, target_console=test_console)
+            self.assertEqual(status, "applied")
+
+            updated_pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
+            self.assertEqual(updated_pkg["devDependencies"]["@nlabrazi/config-biome"], "^0.2.1")
+            self.assertEqual(updated_pkg["devDependencies"]["nuxt"], "^4.4.3")
 
 
 if __name__ == "__main__":

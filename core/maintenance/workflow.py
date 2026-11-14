@@ -20,6 +20,8 @@ from core.maintenance.detector import (
 )
 from core.maintenance.environments import build_environment_matrix, collect_declared_versions
 from core.maintenance.git_ops import (
+    apply_direct_staging_updates,
+    collect_direct_staging_updates,
     merge_renovate_pr_to_staging,
     run_maintenance_auto_commit,
     run_maintenance_promote_to_base,
@@ -234,8 +236,8 @@ def render_maintenance_menu(repo_name: str) -> None:
     )
     table.add_row(
         "2",
-        "⚡ Traiter les PRs Renovate (Bump guidé)",
-        "Voir le verdict IA de chaque PR, merger les bumps sûrs sur staging, tester et promouvoir vers master.",
+        "⚡ Bumper les dépendances sur staging",
+        "Voir les mises à jour disponibles, appliquer directement sur staging, tester, commiter et promouvoir vers master.",
     )
     table.add_row(
         "3",
@@ -295,6 +297,12 @@ def _audit_with_progress(
     return report
 
 
+def _is_safe_direct_update(pkg: str, update_type: str) -> bool:
+    if pkg.startswith("@nlabrazi/"):
+        return True
+    return update_type in {"patch", "minor", "pin", "digest"}
+
+
 def run_guided_pr_bump_workflow(
     repo_path: str,
     repo_name: str,
@@ -304,16 +312,96 @@ def run_guided_pr_bump_workflow(
 ) -> str:
     out = target_console or console
     if not report.open_prs:
-        out.print()
-        out.print(
-            ui_panel(
-                "Aucune Pull Request Renovate ouverte sur ce dépôt actuellement.",
-                title="Traitement des PRs Renovate",
-                tone="success",
-                compact=True,
+        direct_updates = collect_direct_staging_updates(repo_path, report)
+        if not direct_updates:
+            out.print()
+            out.print(
+                ui_panel(
+                    "Aucune Pull Request Renovate ouverte ni mise à jour en attente sur ce dépôt actuellement.",
+                    title="Bump des Dépendances sur Staging",
+                    tone="success",
+                    compact=True,
+                )
             )
+            return "no-prs"
+
+        out.print()
+        table = ui_table(
+            title=f"Mises à jour disponibles sur staging · {repo_name}",
+            caption="Détectées via le Dependency Dashboard Renovate et npm outdated (0 branche créée).",
         )
-        return "no-prs"
+        table.add_column("#", justify="right", style="cyan", no_wrap=True)
+        table.add_column("Paquet", style="bold white")
+        table.add_column("Actuel", style="dim")
+        table.add_column("Cible", style="bold green")
+        table.add_column("Type", justify="center")
+        table.add_column("Risque", style="white")
+
+        for idx, upd in enumerate(direct_updates, start=1):
+            if upd.package.startswith("@nlabrazi/"):
+                risk_label = "[bold green]🟢 Sûr (Outillage @nlabrazi)[/]"
+            elif _is_safe_direct_update(upd.package, upd.update_type):
+                risk_label = "[bold green]🟢 Sûr (Patch/Minor)[/]"
+            else:
+                risk_label = "[bold yellow]🟠 Majeur / À vérifier[/]"
+            table.add_row(
+                str(idx),
+                upd.package,
+                upd.from_version or "?",
+                upd.to_version,
+                upd.update_type,
+                risk_label,
+            )
+        out.print(table)
+
+        mode = Prompt.ask(
+            "\n[bold white]Mode de bump sur staging (1=Toutes les sûres, 2=Choisir paquet par paquet, 3=Tout inclure, q=Annuler)[/]",
+            choices=["1", "2", "3", "q"],
+            default="1",
+            show_choices=False,
+        ).lower()
+        if mode == "q":
+            return "skipped"
+
+        if mode == "1":
+            selected = [u for u in direct_updates if _is_safe_direct_update(u.package, u.update_type)]
+        elif mode == "2":
+            selected = []
+            for upd in direct_updates:
+                if ask_yes_no(
+                    f"Mettre à jour {upd.package} ({upd.from_version or '?'} → {upd.to_version}, {upd.update_type}) sur staging ?",
+                    default="y" if _is_safe_direct_update(upd.package, upd.update_type) else "n",
+                ):
+                    selected.append(upd)
+        else:
+            selected = list(direct_updates)
+
+        if not selected:
+            out.print(
+                ui_panel(
+                    "Aucune mise à jour sélectionnée.",
+                    title="Bump Direct sur Staging",
+                    tone="info",
+                    compact=True,
+                )
+            )
+            return "skipped"
+
+        apply_status = apply_direct_staging_updates(
+            repo_path,
+            repo_name,
+            selected,
+            target_console=out,
+        )
+        if apply_status in {"applied", "dry-run"}:
+            out.print()
+            if ask_yes_no("Exécuter les validations et tests locaux (check & test) sur staging maintenant ?", default="y"):
+                val_report = run_migration_validations(report, execute_local_tests=True)
+                render_validation_report(val_report, target_console=out)
+            run_maintenance_auto_commit(repo_path, repo_name, target_console=out)
+            run_maintenance_promote_to_base(repo_path, repo_name, target_console=out)
+            return "processed"
+        return apply_status
 
     merged_or_simulated = 0
     for pr in report.open_prs:

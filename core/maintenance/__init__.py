@@ -15,6 +15,8 @@ from core.maintenance.environments import (
     collect_declared_versions,
 )
 from core.maintenance.git_ops import (
+    apply_direct_staging_updates,
+    collect_direct_staging_updates,
     merge_renovate_pr_to_staging,
     run_maintenance_auto_commit,
     run_maintenance_promote_to_base,
@@ -161,6 +163,7 @@ __all__ = [
     "ValidationCheckResult",
     "ValidationReport",
     "analyze_renovate_pr",
+    "apply_direct_staging_updates",
     "apply_migration_changes",
     "ask_maintenance_action",
     "audit_repository",
@@ -168,6 +171,7 @@ __all__ = [
     "build_fallback_pr_analysis",
     "classify_repository_update_risks",
     "collect_declared_versions",
+    "collect_direct_staging_updates",
     "detect_deployment_files",
     "detect_project_stacks",
     "extract_release_notes_signals",

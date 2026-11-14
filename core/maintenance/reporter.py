@@ -26,6 +26,7 @@ from core.maintenance.models import (
     UpdateRiskAssessment,
     ValidationReport,
 )
+from core.maintenance.analyzer import parse_dashboard_pending_update
 from core.maintenance.journal import get_resume_recommendation
 from utils.common import is_dry_run
 from utils.console import ui_panel, ui_table
@@ -161,11 +162,21 @@ def render_project_dashboard(report: AuditReport, *, target_console: Console | N
     else:
         if db.pending_or_rate_limited_items:
             pr_lines.append(
-                f"🟡 Aucune PR ouverte, mais [bold]{len(db.pending_or_rate_limited_items)}[/] mise(s) à jour en attente sur le Dependency Dashboard (#{db.issue_number or '?'})."
+                f"🟡 Aucune PR ouverte, mais [bold]{len(db.pending_or_rate_limited_items)}[/] mise(s) à jour en attente sur le Dependency Dashboard (#{db.issue_number or '?'}) :"
             )
+            for raw_item in db.pending_or_rate_limited_items[:12]:
+                pkg, from_ver, to_ver, upd_type = parse_dashboard_pending_update(raw_item)
+                if pkg.startswith("@nlabrazi/"):
+                    item_badge = "[bold green]🟢 OUTILLAGE INTERNE (SAFE)[/]"
+                elif upd_type in {"patch", "minor", "pin", "digest"}:
+                    item_badge = f"[bold green]🟢 {upd_type.upper()} (SAFE)[/]"
+                else:
+                    item_badge = f"[bold yellow]🟠 {upd_type.upper()} (À VÉRIFIER)[/]"
+                ver_label = f"{from_ver} → {to_ver}" if from_ver != "UNKNOWN" else f"→ {to_ver}"
+                pr_lines.append(f"   • {item_badge}  [bold white]{pkg}[/]  [dim]({ver_label})[/]")
         else:
             dash_note = f" (Dashboard #{db.issue_number} à jour)" if db.issue_number else ""
-            pr_lines.append(f"[bold green]✅ Aucune PR Renovate ouverte{dash_note} — rien à bumper.[/]")
+            pr_lines.append(f"[bold green]✅ Aucune PR Renovate ouverte{dash_note} — rien à bumper (utilisez [2] pour vérifier npm outdated sur staging).[/]")
 
     pr_tone = "info"
     if any(pr.ci_status == STATUS_FAIL or (pr.analysis and pr.analysis.breaking_change) for pr in report.open_prs):
@@ -194,6 +205,10 @@ def render_project_dashboard(report: AuditReport, *, target_console: Console | N
         action_items.append(f"🟡 [bold]Virtualenv non ignoré[/] : exclure {', '.join(gs.untracked_venv_entries)} dans .git/info/exclude (action [bold cyan][1][/]).")
     if report.open_prs:
         action_items.append(f"⚡ [bold]{len(report.open_prs)} PR(s) Renovate à traiter[/] : utilisez l'action [bold cyan][2][/] pour analyser et merger.")
+    elif db.pending_or_rate_limited_items:
+        action_items.append(
+            f"⚡ [bold]{len(db.pending_or_rate_limited_items)} mise(s) à jour disponible(s)[/] : utilisez l'action [bold cyan][2][/] pour bumper directement sur staging."
+        )
     for st in report.stacks:
         if st.ecosystem == "python" and st.unpinned_dependencies:
             sample = ", ".join(st.unpinned_dependencies[:5])
