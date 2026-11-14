@@ -32,11 +32,15 @@ KNOWN_NODE_FRAMEWORKS = (
     ("vite", "Vite"),
     ("@playwright/test", "Playwright"),
     ("playwright", "Playwright"),
+    ("@nlabrazi/config-playwright", "Playwright"),
     ("@biomejs/biome", "Biome"),
+    ("@nlabrazi/config-biome", "Biome"),
     ("prisma", "Prisma"),
     ("@prisma/client", "Prisma"),
     ("vitest", "Vitest"),
+    ("@nlabrazi/config-vitest", "Vitest"),
     ("typescript", "TypeScript"),
+    ("@nlabrazi/tsconfig", "TypeScript"),
 )
 
 

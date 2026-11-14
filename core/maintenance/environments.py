@@ -153,6 +153,28 @@ def _extract_local_versions(repo_root: Path) -> list[DeclaredVersion]:
                             f"{rel}#@playwright/test",
                         )
                     )
+                elif "@nlabrazi/config-playwright" in combined:
+                    lock_file = directory / "package-lock.json"
+                    if lock_file.is_file():
+                        try:
+                            lock_data = json.loads(lock_file.read_text(encoding="utf-8"))
+                            lock_pkgs = lock_data.get("packages") if isinstance(lock_data, dict) else {}
+                            pw_lock = (
+                                lock_pkgs.get("node_modules/@playwright/test", {}).get("version")
+                                if isinstance(lock_pkgs, dict)
+                                else None
+                            )
+                            if isinstance(pw_lock, str) and pw_lock.strip():
+                                found.append(
+                                    DeclaredVersion(
+                                        "Playwright",
+                                        "Local",
+                                        pw_lock.strip(),
+                                        f"{_rel_path(repo_root, lock_file)}#node_modules/@playwright/test",
+                                    )
+                                )
+                        except Exception:
+                            pass
 
     return found
 
