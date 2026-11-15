@@ -394,19 +394,6 @@ def collect_direct_staging_updates(
 ) -> list[RenovateUpdateItem]:
     updates_by_pkg: dict[str, RenovateUpdateItem] = {}
 
-    raw_dashboard_items = list(report.dashboard.pending_or_rate_limited_items) + list(report.dashboard.open_items)
-    for raw_item in raw_dashboard_items:
-        pkg, from_ver, to_ver, upd_type = parse_dashboard_pending_update(raw_item)
-        if not pkg or to_ver == STATUS_UNKNOWN:
-            continue
-        updates_by_pkg[pkg] = RenovateUpdateItem(
-            package=pkg,
-            update_type=upd_type,
-            from_version=from_ver if from_ver != STATUS_UNKNOWN else "",
-            to_version=to_ver,
-            raw_change=f"{from_ver} -> {to_ver}" if from_ver != STATUS_UNKNOWN else f"-> {to_ver}",
-        )
-
     if include_npm_outdated:
         repo_root = Path(repo_path)
         for directory in (repo_root, repo_root / "ui", repo_root / "frontend"):
@@ -426,11 +413,25 @@ def collect_direct_staging_updates(
             for pkg, info in parsed.items():
                 if not isinstance(info, dict) or pkg in updates_by_pkg:
                     continue
-                from_ver = str(info.get("current") or info.get("wanted") or "").strip()
-                to_ver = str(info.get("latest") or info.get("wanted") or "").strip()
-                if not to_ver or from_ver == to_ver:
+                current_ver = str(info.get("current") or "").strip()
+                wanted_ver = str(info.get("wanted") or "").strip()
+                latest_ver = str(info.get("latest") or "").strip()
+                from_ver = current_ver or wanted_ver
+
+                # Prefer safe semver-compatible 'wanted' version when available;
+                # fall back to 'latest' only if not a pre-release (-rc, -alpha, -beta).
+                if wanted_ver and from_ver and wanted_ver != from_ver:
+                    to_ver = wanted_ver
+                    upd_type = infer_semver_update_type(from_ver, to_ver)
+                elif latest_ver and "-" not in latest_ver and latest_ver != from_ver:
+                    to_ver = latest_ver
+                    upd_type = infer_semver_update_type(from_ver, to_ver) if from_ver else "major"
+                    # In semver, 0.x minor bumps where wanted == current are breaking
+                    if from_ver.startswith("0.") and upd_type == "minor":
+                        upd_type = "major"
+                else:
                     continue
-                upd_type = infer_semver_update_type(from_ver, to_ver) if from_ver else "unknown"
+
                 updates_by_pkg[pkg] = RenovateUpdateItem(
                     package=pkg,
                     update_type=upd_type,
@@ -439,7 +440,26 @@ def collect_direct_staging_updates(
                     raw_change=f"{from_ver} -> {to_ver}" if from_ver else f"-> {to_ver}",
                 )
 
-    return list(updates_by_pkg.values())
+    for raw_item in report.dashboard.pending_or_rate_limited_items:
+        pkg, from_ver, to_ver, upd_type = parse_dashboard_pending_update(raw_item)
+        if not pkg or to_ver == STATUS_UNKNOWN or from_ver == STATUS_UNKNOWN or pkg in updates_by_pkg:
+            continue
+        updates_by_pkg[pkg] = RenovateUpdateItem(
+            package=pkg,
+            update_type=upd_type,
+            from_version=from_ver,
+            to_version=to_ver,
+            raw_change=f"{from_ver} -> {to_ver}",
+        )
+
+    items = list(updates_by_pkg.values())
+    items.sort(
+        key=lambda u: (
+            0 if u.package.startswith("@nlabrazi/") else (1 if u.update_type in {"patch", "minor", "pin", "digest"} else 2),
+            u.package,
+        )
+    )
+    return items
 
 
 def apply_direct_staging_updates(
