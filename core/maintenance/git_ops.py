@@ -386,6 +386,39 @@ def run_renovate_onboarding_workflow(
     return "dry-run" if is_dry_run() else "completed"
 
 
+def _iter_node_package_json_files(repo_root: Path) -> tuple[list[Path], bool]:
+    files: list[Path] = []
+    has_root_workspaces = False
+
+    root_pkg = repo_root / "package.json"
+    if root_pkg.is_file():
+        files.append(root_pkg)
+        try:
+            root_data = json.loads(root_pkg.read_text(encoding="utf-8"))
+        except Exception:
+            root_data = {}
+        raw_ws = root_data.get("workspaces") if isinstance(root_data, dict) else None
+        ws_patterns: list[str] = []
+        if isinstance(raw_ws, list):
+            ws_patterns = [str(p) for p in raw_ws if isinstance(p, str)]
+        elif isinstance(raw_ws, dict) and isinstance(raw_ws.get("packages"), list):
+            ws_patterns = [str(p) for p in raw_ws["packages"] if isinstance(p, str)]
+        if ws_patterns:
+            has_root_workspaces = True
+            for pattern in ws_patterns:
+                for ws_dir in sorted(repo_root.glob(pattern)):
+                    ws_pkg = ws_dir / "package.json"
+                    if ws_pkg.is_file() and ws_pkg not in files:
+                        files.append(ws_pkg)
+
+    for subdir in ("ui", "frontend", "web", "api", "backend", "desktop-shell"):
+        sub_pkg = repo_root / subdir / "package.json"
+        if sub_pkg.is_file() and sub_pkg not in files:
+            files.append(sub_pkg)
+
+    return files, has_root_workspaces
+
+
 def collect_direct_staging_updates(
     repo_path: str,
     report: AuditReport,
@@ -396,7 +429,7 @@ def collect_direct_staging_updates(
 
     if include_npm_outdated:
         repo_root = Path(repo_path)
-        for directory in (repo_root, repo_root / "ui", repo_root / "frontend"):
+        for directory in (repo_root, repo_root / "ui", repo_root / "frontend", repo_root / "web", repo_root / "api"):
             pkg_json = directory / "package.json"
             if not pkg_json.is_file():
                 continue
@@ -410,9 +443,18 @@ def collect_direct_staging_updates(
                 continue
             if not isinstance(parsed, dict):
                 continue
-            for pkg, info in parsed.items():
-                if not isinstance(info, dict) or pkg in updates_by_pkg:
+            for pkg, raw_info in parsed.items():
+                if pkg in updates_by_pkg:
                     continue
+                if isinstance(raw_info, list):
+                    info = next((entry for entry in raw_info if isinstance(entry, dict)), None)
+                elif isinstance(raw_info, dict):
+                    info = raw_info
+                else:
+                    info = None
+                if not isinstance(info, dict):
+                    continue
+
                 current_ver = str(info.get("current") or "").strip()
                 wanted_ver = str(info.get("wanted") or "").strip()
                 latest_ver = str(info.get("latest") or "").strip()
@@ -518,11 +560,11 @@ def apply_direct_staging_updates(
     repo_root = Path(repo_path)
     applied_pkgs: list[str] = []
 
-    # 1. Apply Node/npm updates
-    for directory in (repo_root, repo_root / "ui", repo_root / "frontend"):
-        pkg_json = directory / "package.json"
-        if not pkg_json.is_file():
-            continue
+    # 1. Apply Node/npm updates across root, subdirectories, and npm workspaces
+    pkg_json_files, has_root_workspaces = _iter_node_package_json_files(repo_root)
+    install_dirs: list[Path] = []
+
+    for pkg_json in pkg_json_files:
         try:
             pkg_data = json.loads(pkg_json.read_text(encoding="utf-8"))
         except Exception:
@@ -530,7 +572,7 @@ def apply_direct_staging_updates(
         if not isinstance(pkg_data, dict):
             continue
 
-        dir_changed = False
+        file_changed = False
         for section in ("dependencies", "devDependencies"):
             deps = pkg_data.get(section)
             if not isinstance(deps, dict):
@@ -539,28 +581,35 @@ def apply_direct_staging_updates(
                 if upd.package in deps:
                     current_spec = str(deps[upd.package])
                     prefix_match = re.match(r"^([~^])", current_spec)
-                    prefix = prefix_match.group(1) if prefix_match else "^"
+                    prefix = prefix_match.group(1) if prefix_match else ""
                     clean_target = upd.to_version.lstrip("v^~")
-                    deps[upd.package] = f"{prefix}{clean_target}"
-                    dir_changed = True
-                    if upd.package not in applied_pkgs:
-                        applied_pkgs.append(upd.package)
+                    new_spec = f"{prefix}{clean_target}"
+                    if deps[upd.package] != new_spec:
+                        deps[upd.package] = new_spec
+                        file_changed = True
+                        if upd.package not in applied_pkgs:
+                            applied_pkgs.append(upd.package)
 
-        if dir_changed:
+        if file_changed:
             pkg_json.write_text(json.dumps(pkg_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-            res = run_command(["npm", "install"], cwd=str(directory), silent=True)
-            if res.returncode != 0:
-                details = ((res.stderr or "") + "\n" + (res.stdout or "")).strip() or f"exit code {res.returncode}"
-                out.print()
-                out.print(
-                    ui_panel(
-                        f"Échec de 'npm install' dans {directory} :\n{details}",
-                        title="Bump Direct Échoué",
-                        tone="danger",
-                        compact=True,
-                    )
+            target_install_dir = repo_root if (has_root_workspaces and pkg_json.parent != repo_root and (repo_root / "package.json").is_file() and pkg_json.parent.parent in {repo_root, repo_root / "apps", repo_root / "packages"}) else pkg_json.parent
+            if target_install_dir not in install_dirs:
+                install_dirs.append(target_install_dir)
+
+    for install_dir in install_dirs:
+        res = run_command(["npm", "install"], cwd=str(install_dir), silent=True)
+        if res.returncode != 0:
+            details = ((res.stderr or "") + "\n" + (res.stdout or "")).strip() or f"exit code {res.returncode}"
+            out.print()
+            out.print(
+                ui_panel(
+                    f"Échec de 'npm install' dans {install_dir} :\n{details}",
+                    title="Bump Direct Échoué",
+                    tone="danger",
+                    compact=True,
                 )
-                return "failed"
+            )
+            return "failed"
 
     # 2. Apply Python requirements*.txt updates
     for directory in (repo_root, repo_root / "backend", repo_root / "api"):
