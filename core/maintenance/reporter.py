@@ -166,6 +166,9 @@ def render_project_dashboard(report: AuditReport, *, target_console: Console | N
             )
             for raw_item in db.pending_or_rate_limited_items[:12]:
                 pkg, from_ver, to_ver, upd_type = parse_dashboard_pending_update(raw_item)
+                if to_ver == "UNKNOWN":
+                    pr_lines.append(f"   • [bold cyan]📦 GROUPE EN ATTENTE[/]  [white]{raw_item}[/]")
+                    continue
                 if pkg.startswith("@nlabrazi/"):
                     item_badge = "[bold green]🟢 OUTILLAGE INTERNE (SAFE)[/]"
                 elif upd_type in {"patch", "minor", "pin", "digest"}:
