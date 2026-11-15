@@ -563,22 +563,26 @@ def apply_direct_staging_updates(
     # 1. Apply Node/npm updates across root, subdirectories, and npm workspaces
     pkg_json_files, has_root_workspaces = _iter_node_package_json_files(repo_root)
     install_dirs: list[Path] = []
+    original_pkg_contents: dict[Path, str] = {}
 
     for pkg_json in pkg_json_files:
         try:
-            pkg_data = json.loads(pkg_json.read_text(encoding="utf-8"))
+            raw_original = pkg_json.read_text(encoding="utf-8")
+            pkg_data = json.loads(raw_original)
         except Exception:
             continue
         if not isinstance(pkg_data, dict):
             continue
 
         file_changed = False
+        file_matched = False
         for section in ("dependencies", "devDependencies"):
             deps = pkg_data.get(section)
             if not isinstance(deps, dict):
                 continue
             for upd in updates:
                 if upd.package in deps:
+                    file_matched = True
                     current_spec = str(deps[upd.package])
                     prefix_match = re.match(r"^([~^])", current_spec)
                     prefix = prefix_match.group(1) if prefix_match else ""
@@ -587,11 +591,13 @@ def apply_direct_staging_updates(
                     if deps[upd.package] != new_spec:
                         deps[upd.package] = new_spec
                         file_changed = True
-                        if upd.package not in applied_pkgs:
-                            applied_pkgs.append(upd.package)
+                    if upd.package not in applied_pkgs:
+                        applied_pkgs.append(upd.package)
 
         if file_changed:
+            original_pkg_contents[pkg_json] = raw_original
             pkg_json.write_text(json.dumps(pkg_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        if file_changed or file_matched:
             target_install_dir = repo_root if (has_root_workspaces and pkg_json.parent != repo_root and (repo_root / "package.json").is_file() and pkg_json.parent.parent in {repo_root, repo_root / "apps", repo_root / "packages"}) else pkg_json.parent
             if target_install_dir not in install_dirs:
                 install_dirs.append(target_install_dir)
@@ -599,12 +605,17 @@ def apply_direct_staging_updates(
     for install_dir in install_dirs:
         res = run_command(["npm", "install"], cwd=str(install_dir), silent=True)
         if res.returncode != 0:
+            for modified_path, old_text in original_pkg_contents.items():
+                try:
+                    modified_path.write_text(old_text, encoding="utf-8")
+                except OSError:
+                    pass
             details = ((res.stderr or "") + "\n" + (res.stdout or "")).strip() or f"exit code {res.returncode}"
             out.print()
             out.print(
                 ui_panel(
-                    f"Échec de 'npm install' dans {install_dir} :\n{details}",
-                    title="Bump Direct Échoué",
+                    f"Échec de 'npm install' dans {install_dir} (les fichiers package.json ont été restaurés) :\n{details}",
+                    title="Bump Direct Échoué · Conflit de Dépendances",
                     tone="danger",
                     compact=True,
                 )
