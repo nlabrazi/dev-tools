@@ -472,7 +472,7 @@ def run_ruby_gem_bump_workflow(
     out.print()
     table = ui_table(
         title=f"Gems Ruby à mettre à jour sur staging · {repo_name}",
-        caption="Détectées via bundle outdated --only-explicit (0 branche créée).",
+        caption="Détectées via bundle outdated (directes + transitives dans Gemfile.lock, 0 branche créée).",
     )
     table.add_column("#", justify="right", style="cyan", no_wrap=True)
     table.add_column("Gem", style="bold white")
