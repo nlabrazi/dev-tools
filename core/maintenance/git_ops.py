@@ -595,6 +595,15 @@ def apply_direct_staging_updates(
                         applied_pkgs.append(upd.package)
 
         if file_changed:
+            pkg_name_val = str(pkg_data.get("name") or "")
+            pkg_ver_val = str(pkg_data.get("version") or "")
+            if pkg_name_val.startswith("@nlabrazi/") and not pkg_data.get("private"):
+                ver_m = re.match(r"^(\d+)\.(\d+)\.(\d+)(.*)$", pkg_ver_val)
+                if ver_m:
+                    next_patch = int(ver_m.group(3)) + 1
+                    bumped_pkg_ver = f"{ver_m.group(1)}.{ver_m.group(2)}.{next_patch}{ver_m.group(4)}"
+                    pkg_data["version"] = bumped_pkg_ver
+                    applied_pkgs.append(f"{pkg_name_val} ({pkg_ver_val} → {bumped_pkg_ver})")
             original_pkg_contents[pkg_json] = raw_original
             pkg_json.write_text(json.dumps(pkg_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         if file_changed or file_matched:
