@@ -602,6 +602,24 @@ def apply_direct_staging_updates(
             if target_install_dir not in install_dirs:
                 install_dirs.append(target_install_dir)
 
+    # Keep Jenkinsfile Playwright Docker image aligned when @playwright/test is bumped
+    jenkinsfile = repo_root / "Jenkinsfile"
+    if jenkinsfile.is_file():
+        for upd in updates:
+            if upd.package == "@playwright/test" and upd.package in applied_pkgs:
+                try:
+                    jf_text = jenkinsfile.read_text(encoding="utf-8")
+                    clean_pw = upd.to_version.lstrip("v^~")
+                    updated_jf = re.sub(
+                        r"(mcr\.microsoft\.com/playwright:v?)([0-9]+(?:\.[0-9]+){0,2})(-[A-Za-z0-9.\-_]+)?",
+                        lambda m: f"{m.group(1)}{clean_pw}{m.group(3) or ''}",
+                        jf_text,
+                    )
+                    if updated_jf != jf_text:
+                        jenkinsfile.write_text(updated_jf, encoding="utf-8")
+                except OSError:
+                    pass
+
     for install_dir in install_dirs:
         res = run_command(["npm", "install"], cwd=str(install_dir), silent=True)
         if res.returncode != 0:
@@ -671,4 +689,174 @@ def apply_direct_staging_updates(
         )
     )
     return "applied"
+
+
+def collect_ruby_gem_updates(repo_path: str) -> list[RenovateUpdateItem]:
+    repo_root = Path(repo_path)
+    gemfile = repo_root / "Gemfile"
+    if not gemfile.is_file():
+        return []
+
+    updates_by_pkg: dict[str, RenovateUpdateItem] = {}
+    res = run_command(["bundle", "outdated", "--only-explicit", "--parseable"], cwd=str(repo_root), silent=True)
+    for raw_line in (res.stdout or "").splitlines():
+        m = re.match(
+            r"^([A-Za-z0-9_.\-]+)\s+\(newest\s+([^,\s)]+),\s+installed\s+([^,\s)]+)",
+            raw_line.strip(),
+        )
+        if not m:
+            continue
+        pkg, to_ver, from_ver = m.group(1), m.group(2), m.group(3)
+        if pkg in updates_by_pkg or "-" in to_ver or from_ver == to_ver:
+            continue
+        upd_type = infer_semver_update_type(from_ver, to_ver)
+        updates_by_pkg[pkg] = RenovateUpdateItem(
+            package=pkg,
+            update_type=upd_type,
+            from_version=from_ver,
+            to_version=to_ver,
+            raw_change=f"{from_ver} -> {to_ver}",
+        )
+
+    items = list(updates_by_pkg.values())
+    items.sort(
+        key=lambda u: (
+            0 if u.update_type in {"patch", "minor", "pin", "digest"} else 1,
+            u.package,
+        )
+    )
+    return items
+
+
+def apply_ruby_gem_updates(
+    repo_path: str,
+    repo_name: str,
+    updates: list[RenovateUpdateItem],
+    *,
+    target_console: Console | None = None,
+) -> str:
+    out = target_console or console
+    if not updates:
+        return "no-op"
+
+    repo_root = Path(repo_path)
+    gemfile = repo_root / "Gemfile"
+    gemfile_lock = repo_root / "Gemfile.lock"
+    if not gemfile.is_file():
+        out.print()
+        out.print(
+            ui_panel(
+                "Aucun fichier Gemfile détecté dans ce dépôt : cette action est réservée aux projets Ruby / Ruby on Rails.",
+                title="Bump Gems Ruby · Projet Non-Ruby",
+                tone="warning",
+                compact=True,
+            )
+        )
+        return "not-ruby"
+
+    git_state = inspect_git_state(repo_path)
+    if git_state.branch != DEFAULT_HEAD_BRANCH:
+        if git_state.staged_count > 0 or git_state.unstaged_count > 0:
+            out.print(
+                ui_panel(
+                    (
+                        f"Vous êtes sur '{git_state.branch}' avec des modifications non commitées. "
+                        f"Commitez ou stashez vos changements avant de basculer sur '{DEFAULT_HEAD_BRANCH}'."
+                    ),
+                    title="Bump Gems Bloqué · Modifications en cours",
+                    tone="danger",
+                    compact=True,
+                )
+            )
+            return "blocked"
+
+        if not ask_yes_no(
+            f"Le dépôt est sur '{git_state.branch}'. Basculer sur '{DEFAULT_HEAD_BRANCH}' et synchroniser ?",
+            default="y",
+        ):
+            return "skipped"
+
+        if ensure_local_branch_exists(repo_path, repo_name, DEFAULT_HEAD_BRANCH) == "failed":
+            return "failed"
+        if checkout_branch(repo_path, repo_name, DEFAULT_HEAD_BRANCH) == "failed":
+            return "failed"
+        pull_ff_only(repo_path, repo_name, DEFAULT_HEAD_BRANCH)
+
+    summary_lines = [f"• {u.package}: {u.from_version or '?'} → {u.to_version} ({u.update_type})" for u in updates]
+    if is_dry_run():
+        out.print()
+        out.print(
+            ui_panel(
+                f"Dry-run : mettrait à jour les gems Ruby sur '{DEFAULT_HEAD_BRANCH}' dans {repo_name} :\n"
+                + "\n".join(summary_lines),
+                title="Bump Gems Ruby sur Staging (Dry-Run)",
+                tone="info",
+                compact=True,
+            )
+        )
+        return "dry-run"
+
+    try:
+        gemfile_text = gemfile.read_text(encoding="utf-8")
+        lock_text = gemfile_lock.read_text(encoding="utf-8") if gemfile_lock.is_file() else ""
+    except OSError:
+        gemfile_text = ""
+        lock_text = ""
+
+    bundler_gems: list[str] = []
+    new_gemfile_text = gemfile_text
+    for upd in updates:
+        gem_decl_re = re.compile(
+            rf"""^(\s*gem\s+['"]{re.escape(upd.package)}['"]\s*,\s*['"])([^'"]+)(['"])""",
+            re.MULTILINE,
+        )
+        if gem_decl_re.search(new_gemfile_text) or f" {upd.package} (" in lock_text:
+            bundler_gems.append(upd.package)
+            if upd.update_type == "major":
+                major_minor = ".".join(upd.to_version.lstrip("v^~").split(".")[:2])
+                new_gemfile_text = gem_decl_re.sub(rf"\g<1>~> {major_minor}\g<3>", new_gemfile_text)
+
+    if not bundler_gems:
+        out.print()
+        out.print(
+            ui_panel(
+                "Aucune gem sélectionnée ne correspondait au Gemfile / Gemfile.lock du projet.",
+                title="Bump Gems Ruby sur Staging",
+                tone="warning",
+                compact=True,
+            )
+        )
+        return "no-op"
+
+    if new_gemfile_text != gemfile_text:
+        gemfile.write_text(new_gemfile_text, encoding="utf-8")
+
+    res = run_command(["bundle", "update", "--conservative", *bundler_gems], cwd=str(repo_root), silent=True)
+    if res.returncode != 0:
+        if new_gemfile_text != gemfile_text:
+            gemfile.write_text(gemfile_text, encoding="utf-8")
+        details = ((res.stderr or "") + "\n" + (res.stdout or "")).strip() or f"exit code {res.returncode}"
+        out.print()
+        out.print(
+            ui_panel(
+                f"Échec de 'bundle update' dans {repo_root} (Gemfile restauré) :\n{details}",
+                title="Bump Bundler Échoué",
+                tone="danger",
+                compact=True,
+            )
+        )
+        return "failed"
+
+    out.print()
+    out.print(
+        ui_panel(
+            f"Gems Ruby mises à jour directement sur '{DEFAULT_HEAD_BRANCH}' ({len(bundler_gems)} gem(s)) :\n"
+            + "\n".join(f"• {gem}" for gem in bundler_gems),
+            title="Bump Gems Ruby Appliqué sur Staging",
+            tone="success",
+            compact=True,
+        )
+    )
+    return "applied"
+
 

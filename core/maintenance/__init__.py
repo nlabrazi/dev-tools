@@ -16,7 +16,9 @@ from core.maintenance.environments import (
 )
 from core.maintenance.git_ops import (
     apply_direct_staging_updates,
+    apply_ruby_gem_updates,
     collect_direct_staging_updates,
+    collect_ruby_gem_updates,
     merge_renovate_pr_to_staging,
     run_maintenance_auto_commit,
     run_maintenance_promote_to_base,
@@ -120,6 +122,7 @@ from core.maintenance.workflow import (
     render_maintenance_menu,
     run_dependency_maintenance_for_repo,
     run_guided_pr_bump_workflow,
+    run_ruby_gem_bump_workflow,
 )
 
 __all__ = [
@@ -165,6 +168,7 @@ __all__ = [
     "analyze_renovate_pr",
     "apply_direct_staging_updates",
     "apply_migration_changes",
+    "apply_ruby_gem_updates",
     "ask_maintenance_action",
     "audit_repository",
     "build_environment_matrix",
@@ -172,6 +176,7 @@ __all__ = [
     "classify_repository_update_risks",
     "collect_declared_versions",
     "collect_direct_staging_updates",
+    "collect_ruby_gem_updates",
     "detect_deployment_files",
     "detect_project_stacks",
     "extract_release_notes_signals",
@@ -216,6 +221,7 @@ __all__ = [
     "run_maintenance_promote_to_base",
     "run_migration_validations",
     "run_renovate_onboarding_workflow",
+    "run_ruby_gem_bump_workflow",
     "save_audit_report",
     "save_maintenance_journal",
     "summarize_risk_assessments",
