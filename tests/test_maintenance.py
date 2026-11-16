@@ -27,11 +27,13 @@ from core.maintenance import (
     analyze_renovate_pr,
     apply_direct_staging_updates,
     apply_migration_changes,
+    apply_ruby_gem_updates,
     audit_repository,
     build_environment_matrix,
     classify_repository_update_risks,
     collect_declared_versions,
     collect_direct_staging_updates,
+    collect_ruby_gem_updates,
     detect_project_stacks,
     extract_release_notes_signals,
     format_pr_decision_badge,
@@ -67,6 +69,7 @@ from core.maintenance import (
     run_maintenance_promote_to_base,
     run_migration_validations,
     run_renovate_onboarding_workflow,
+    run_ruby_gem_bump_workflow,
     save_audit_report,
     summarize_risk_assessments,
     sync_local_branch_ff_only,
@@ -1264,6 +1267,32 @@ class MaintenanceSessionResumeTests(unittest.TestCase):
             updated_pkg = json.loads((root / "package.json").read_text(encoding="utf-8"))
             self.assertEqual(updated_pkg["devDependencies"]["@nlabrazi/config-biome"], "^0.2.1")
             self.assertEqual(updated_pkg["devDependencies"]["nuxt"], "^4.4.3")
+
+            # Non-Ruby project exits cleanly with "not-ruby"
+            non_ruby_status = run_ruby_gem_bump_workflow(tmp_dir, "sample-app", report, target_console=test_console)
+            self.assertEqual(non_ruby_status, "not-ruby")
+            self.assertIn("Aucun fichier Gemfile détecté", buffer.getvalue())
+
+            # Ruby project collects and applies Bundler gem updates
+            (root / "Gemfile").write_text('gem "rails", "~> 8.1"\ngem "net-ssh", "~> 7.3"\n', encoding="utf-8")
+            (root / "Gemfile.lock").write_text("GEM\n  specs:\n    rails (8.1.3)\n    net-ssh (7.3.10)\n", encoding="utf-8")
+            bundle_outdated = subprocess.CompletedProcess(
+                args=["bundle", "outdated"],
+                returncode=1,
+                stdout="rails (newest 8.1.4, installed 8.1.3, requested ~> 8.1)\nnet-ssh (newest 8.1.2, installed 7.3.10, requested ~> 7.3)\n",
+                stderr="",
+            )
+            bundle_update = subprocess.CompletedProcess(args=["bundle", "update"], returncode=0, stdout="", stderr="")
+            with patch("core.maintenance.git_ops.run_command", return_value=bundle_outdated):
+                gem_updates = collect_ruby_gem_updates(tmp_dir)
+            self.assertEqual([(u.package, u.update_type) for u in gem_updates], [("rails", "patch"), ("net-ssh", "major")])
+
+            with patch("core.maintenance.detector.git_output", return_value="staging"), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.git_ops.run_command", return_value=bundle_update):
+                gem_status = apply_ruby_gem_updates(tmp_dir, "sample-app", [gem_updates[0]], target_console=test_console)
+            self.assertEqual(gem_status, "applied")
 
 
 if __name__ == "__main__":

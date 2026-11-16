@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 
 from rich.console import Console
 from rich.progress import (
@@ -21,7 +22,9 @@ from core.maintenance.detector import (
 from core.maintenance.environments import build_environment_matrix, collect_declared_versions
 from core.maintenance.git_ops import (
     apply_direct_staging_updates,
+    apply_ruby_gem_updates,
     collect_direct_staging_updates,
+    collect_ruby_gem_updates,
     merge_renovate_pr_to_staging,
     run_maintenance_auto_commit,
     run_maintenance_promote_to_base,
@@ -66,7 +69,7 @@ from core.maintenance.validator import run_migration_validations
 from utils.console import ask_yes_no, ui_panel, ui_table
 
 console = Console()
-MAINTENANCE_MENU_CHOICES = ("1", "2", "3", "4", "r", "q")
+MAINTENANCE_MENU_CHOICES = ("1", "2", "3", "4", "5", "r", "q")
 
 
 def _compute_overall_status(
@@ -249,6 +252,11 @@ def render_maintenance_menu(repo_name: str) -> None:
         "🩺 Checklist Production & Post-déploiement",
         "Vérifier .venv symlink/backups, procédure de rollback et statut du cron via Sentinel.",
     )
+    table.add_row(
+        "5",
+        "💎 Bumper les Gems Ruby/Rails (staging)",
+        "Détecter Gemfile, mettre à jour les gems avec Bundler sur staging, tester, commiter et promouvoir.",
+    )
     table.add_row("r", "🔄 Rafraîchir le Dashboard", "Relancer l'analyse rapide de l'état du projet et des PRs.")
     table.add_row("q", "Retour", "Revenir au menu principal.")
     console.print(table)
@@ -427,6 +435,117 @@ def run_guided_pr_bump_workflow(
     return "reviewed"
 
 
+def run_ruby_gem_bump_workflow(
+    repo_path: str,
+    repo_name: str,
+    report: AuditReport,
+    *,
+    target_console: Console | None = None,
+) -> str:
+    out = target_console or console
+    gemfile = Path(repo_path) / "Gemfile"
+    if not gemfile.is_file():
+        out.print()
+        out.print(
+            ui_panel(
+                "Aucun fichier Gemfile détecté dans ce dépôt : cette action est réservée aux projets Ruby / Ruby on Rails.",
+                title="Bump Gems Ruby · Projet Non-Ruby",
+                tone="warning",
+                compact=True,
+            )
+        )
+        return "not-ruby"
+
+    gem_updates = collect_ruby_gem_updates(repo_path)
+    if not gem_updates:
+        out.print()
+        out.print(
+            ui_panel(
+                "Toutes les gems Ruby déclarées dans Gemfile sont déjà à jour.",
+                title="Bump Gems Ruby sur Staging",
+                tone="success",
+                compact=True,
+            )
+        )
+        return "up-to-date"
+
+    out.print()
+    table = ui_table(
+        title=f"Gems Ruby à mettre à jour sur staging · {repo_name}",
+        caption="Détectées via bundle outdated --only-explicit (0 branche créée).",
+    )
+    table.add_column("#", justify="right", style="cyan", no_wrap=True)
+    table.add_column("Gem", style="bold white")
+    table.add_column("Installée", style="dim")
+    table.add_column("Cible", style="bold green")
+    table.add_column("Type", justify="center")
+    table.add_column("Risque", style="white")
+
+    for idx, upd in enumerate(gem_updates, start=1):
+        if _is_safe_direct_update(upd.package, upd.update_type):
+            risk_label = "[bold green]🟢 Sûr (Patch/Minor)[/]"
+        else:
+            risk_label = "[bold yellow]🟠 Majeur / À vérifier[/]"
+        table.add_row(
+            str(idx),
+            upd.package,
+            upd.from_version or "?",
+            upd.to_version,
+            upd.update_type,
+            risk_label,
+        )
+    out.print(table)
+
+    mode = Prompt.ask(
+        "\n[bold white]Mode de bump Gems sur staging (1=Toutes les sûres, 2=Choisir gem par gem, 3=Tout inclure, q=Annuler)[/]",
+        choices=["1", "2", "3", "q"],
+        default="1",
+        show_choices=False,
+    ).lower()
+    if mode == "q":
+        return "skipped"
+
+    if mode == "1":
+        selected = [u for u in gem_updates if _is_safe_direct_update(u.package, u.update_type)]
+    elif mode == "2":
+        selected = []
+        for upd in gem_updates:
+            if ask_yes_no(
+                f"Mettre à jour la gem {upd.package} ({upd.from_version or '?'} → {upd.to_version}, {upd.update_type}) sur staging ?",
+                default="y" if _is_safe_direct_update(upd.package, upd.update_type) else "n",
+            ):
+                selected.append(upd)
+    else:
+        selected = list(gem_updates)
+
+    if not selected:
+        out.print(
+            ui_panel(
+                "Aucune gem sélectionnée.",
+                title="Bump Gems Ruby sur Staging",
+                tone="info",
+                compact=True,
+            )
+        )
+        return "skipped"
+
+    apply_status = apply_ruby_gem_updates(
+        repo_path,
+        repo_name,
+        selected,
+        target_console=out,
+    )
+    if apply_status in {"applied", "dry-run"}:
+        out.print()
+        if ask_yes_no("Exécuter les validations et tests locaux (RSpec / RuboCop) sur staging maintenant ?", default="y"):
+            val_report = run_migration_validations(report, execute_local_tests=True)
+            render_validation_report(val_report, target_console=out)
+        run_maintenance_auto_commit(repo_path, repo_name, target_console=out)
+        run_maintenance_promote_to_base(repo_path, repo_name, target_console=out)
+        return "processed"
+    return apply_status
+
+
 def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
     existing_journal = load_maintenance_journal(repo_path, repo_name)
     if existing_journal is not None and not existing_journal.is_complete:
@@ -577,3 +696,21 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
                 pending_actions=post_report.notes,
                 is_complete=sentinel_ok and checklist.ready_to_deploy,
             )
+            continue
+
+        if choice == "5":
+            gem_status = run_ruby_gem_bump_workflow(
+                repo_path,
+                repo_name,
+                last_report,
+                target_console=console,
+            )
+            record_maintenance_step(
+                repo_path,
+                repo_name,
+                "bump_gems",
+                gem_status.upper(),
+                details="Bump des gems Ruby/Rails via Bundler",
+                pending_actions=last_report.reservations,
+            )
+            continue
