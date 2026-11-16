@@ -698,7 +698,7 @@ def collect_ruby_gem_updates(repo_path: str) -> list[RenovateUpdateItem]:
         return []
 
     updates_by_pkg: dict[str, RenovateUpdateItem] = {}
-    res = run_command(["bundle", "outdated", "--only-explicit", "--parseable"], cwd=str(repo_root), silent=True)
+    res = run_command(["bundle", "outdated", "--parseable"], cwd=str(repo_root), silent=True)
     for raw_line in (res.stdout or "").splitlines():
         m = re.match(
             r"^([A-Za-z0-9_.\-]+)\s+\(newest\s+([^,\s)]+),\s+installed\s+([^,\s)]+)",
