@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn
 from rich.prompt import Prompt
 
 from utils.console import ask_yes_no, ui_panel, ui_table
@@ -106,11 +107,16 @@ def read_json(path: Path | str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def git(root: Path | str, *args: str) -> subprocess.CompletedProcess[str] | None:
+def git(root: Path | str, *args: str, timeout: float = 10.0) -> subprocess.CompletedProcess[str] | None:
     try:
-        return subprocess.run(['git', '-C', str(root), *args],
-                              capture_output=True, text=True, check=False)
-    except OSError:
+        return subprocess.run(
+            ['git', '-C', str(root), *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
         return None
 
 
@@ -377,6 +383,7 @@ def audit_coverage(
     root_dirs: list[str | Path],
     *,
     include_forks: bool = False,
+    progress_callback: Any = None,
 ) -> list[Project]:
     paths: list[Path] = []
     for r in root_dirs:
@@ -390,7 +397,48 @@ def audit_coverage(
             if me:
                 break
 
-    return [analyze_project(p, me, include_forks) for p in paths]
+    projects: list[Project] = []
+    total = len(paths)
+    for idx, p in enumerate(paths, 1):
+        if progress_callback:
+            progress_callback(idx, total, p.name)
+        projects.append(analyze_project(p, me, include_forks))
+    return projects
+
+
+def audit_coverage_with_progress(
+    root_dirs: list[str | Path],
+    *,
+    include_forks: bool = False,
+    description: str = "Audit coverage",
+    target_console: Console | None = None,
+) -> list[Project]:
+    out = target_console or console
+    out.print()
+    with Progress(
+        SpinnerColumn(style="bold cyan"),
+        TextColumn("[bold cyan]{task.description}"),
+        BarColumn(bar_width=28),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        console=out,
+        transient=True,
+    ) as progress:
+        task_id = progress.add_task(f"Initialisation de l'{description.lower()}...", total=1)
+
+        def _on_progress(current: int, total: int, repo_name: str) -> None:
+            progress.update(
+                task_id,
+                total=total or 1,
+                completed=current,
+                description=f"[cyan]({current}/{total})[/] {description} · [bold white]{repo_name}[/]",
+            )
+
+        return audit_coverage(
+            root_dirs,
+            include_forks=include_forks,
+            progress_callback=_on_progress,
+        )
 
 
 def render_coverage_audit(
@@ -626,13 +674,17 @@ def run_coverage_workflow(root_dirs: list[str]) -> None:
             break
 
         if choice in ("1", "2"):
-            with console.status("[bold cyan]Audit des dépôts en cours...[/]", spinner="dots"):
-                projects = audit_coverage(root_dirs)
+            projects = audit_coverage_with_progress(
+                root_dirs,
+                description="Audit coverage",
+            )
             render_coverage_audit(projects, details=(choice == "2"))
 
         elif choice == "3":
-            with console.status("[bold cyan]Découverte des projets...[/]", spinner="dots"):
-                projects = audit_coverage(root_dirs)
+            projects = audit_coverage_with_progress(
+                root_dirs,
+                description="Découverte des projets",
+            )
             measured = [p for p in projects if p.measured]
             if not measured:
                 console.print(ui_panel("Aucun projet mesurable trouvé.", title="Rien à tester", tone="warning"))
@@ -646,6 +698,8 @@ def run_coverage_workflow(root_dirs: list[str]) -> None:
                 run_repo_coverage(target_proj)
 
         elif choice == "4":
-            with console.status("[bold cyan]Vérification des .gitignore...[/]", spinner="dots"):
-                projects = audit_coverage(root_dirs)
+            projects = audit_coverage_with_progress(
+                root_dirs,
+                description="Vérification des .gitignore",
+            )
             fix_missing_gitignores(projects)
