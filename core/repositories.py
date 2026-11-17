@@ -15,3 +15,7 @@ def iter_git_repositories(root_dir: str) -> Iterator[tuple[str, str]]:
         repo_path = os.path.join(root_dir, repo_name)
         if os.path.isdir(repo_path) and is_git_repo(repo_path):
             yield repo_name, repo_path
+
+
+def collect_repositories(root_dirs: list[str]) -> list[tuple[str, str]]:
+    return [repo for root_dir in root_dirs for repo in iter_git_repositories(root_dir)]

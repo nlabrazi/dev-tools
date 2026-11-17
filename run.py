@@ -1,6 +1,9 @@
 import argparse
 import os
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from pyfiglet import figlet_format
 from rich import print
@@ -10,8 +13,15 @@ from rich.prompt import Prompt
 from utils.console import ui_panel, ui_table
 
 console = Console()
-MENU_CHOICES = ("1", "2", "3", "4", "5", "6", "7", "q")
 REVIEW_TARGET_CHOICES = ("1", "2", "3", "4", "5", "q")
+
+
+@dataclass(frozen=True)
+class WorkflowMenuItem:
+    key: str
+    title: str
+    description: str
+    handler: Callable[..., Any] | None = None
 
 
 class HelpFormatter(argparse.RawDescriptionHelpFormatter):
@@ -114,6 +124,74 @@ def section_title(title: str, emoji: str) -> None:
     )
 
 
+def _handle_auto_commit(*, root_dirs: list[str], head_branch: str, **_: Any) -> None:
+    from core.commit import auto_commit_all_repos
+
+    section_title(f"Auto-Commit {head_branch}", "🔧")
+    selected_repo = ask_action_repository(root_dirs, "Auto Commit")
+    if selected_repo is not None:
+        auto_commit_all_repos(root_dirs, selected_repo_path=selected_repo[1])
+
+
+def _handle_merge(*, root_dirs: list[str], base_branch_strategy: str, **_: Any) -> None:
+    import core.merge as merge
+
+    section_title("Merge Into Base Branches", "🔁")
+    console.print(ui_panel(f"Strategy: {base_branch_strategy}", title="Merge Target", compact=True))
+    selected_repo = ask_action_repository(root_dirs, "Merge")
+    if selected_repo is not None:
+        merge.main(root_dirs, selected_repo_path=selected_repo[1])
+
+
+def _handle_review(*, root_dirs: list[str], **_: Any) -> None:
+    run_review_workflow(root_dirs)
+
+
+def _handle_comment(*, root_dirs: list[str], **_: Any) -> None:
+    run_comment_workflow(root_dirs)
+
+
+def _handle_changelog(*, root_dirs: list[str], **_: Any) -> None:
+    from core.changelog import update_all_repos_interactive
+
+    section_title("Update Changelogs", "📝")
+    update_all_repos_interactive(root_dirs)
+
+
+def _handle_sync(*, root_dirs: list[str], **_: Any) -> None:
+    import core.sync as sync
+
+    section_title("Sync Base Branches", "⏳")
+    console.print(ui_panel(sync.describe_sync_plan(), title="Sync Plan", compact=True))
+    sync.main(root_dirs)
+
+
+def _handle_maintenance(*, root_dirs: list[str], **_: Any) -> None:
+    from core.maintenance import run_dependency_maintenance_for_repo
+
+    section_title("Dependency Maintenance", "🛡️")
+    selected_repo = ask_action_repository(root_dirs, "Dependency Maintenance")
+    if selected_repo is not None:
+        run_dependency_maintenance_for_repo(selected_repo[0], selected_repo[1])
+
+
+WORKFLOW_ITEMS: tuple[WorkflowMenuItem, ...] = (
+    WorkflowMenuItem("1", "Auto Commit", "Build, confirm, commit and push staged changes.", _handle_auto_commit),
+    WorkflowMenuItem("2", "Merge", "Create and auto-merge release pull requests.", _handle_merge),
+    WorkflowMenuItem("3", "Review Code", "Explain selected code context in French.", _handle_review),
+    WorkflowMenuItem("4", "Comment Code", "Preview and optionally apply source comments.", _handle_comment),
+    WorkflowMenuItem("5", "Changelog", "Update changelogs from Conventional Commits.", _handle_changelog),
+    WorkflowMenuItem("6", "Sync", "Fast-forward local base branches.", _handle_sync),
+    WorkflowMenuItem("7", "Dependency Maintenance", "Audit stacks, Renovate PRs with Ollama, and runtime alignment.", _handle_maintenance),
+    WorkflowMenuItem("q", "Quit", "Return to your shell.", None),
+)
+
+MENU_CHOICES: tuple[str, ...] = tuple(item.key for item in WORKFLOW_ITEMS)
+WORKFLOW_DISPATCH: dict[str, Callable[..., Any]] = {
+    item.key: item.handler for item in WORKFLOW_ITEMS if item.handler is not None
+}
+
+
 def render_main_menu(
     *,
     mode_label: str,
@@ -144,14 +222,8 @@ def render_main_menu(
     table.add_column("Workflow", style="bold white", no_wrap=True)
     table.add_column("What it does", style="white")
 
-    table.add_row("1", "Auto Commit", "Build, confirm, commit and push staged changes.")
-    table.add_row("2", "Merge", "Create and auto-merge release pull requests.")
-    table.add_row("3", "Review Code", "Explain selected code context in French.")
-    table.add_row("4", "Comment Code", "Preview and optionally apply source comments.")
-    table.add_row("5", "Changelog", "Update changelogs from Conventional Commits.")
-    table.add_row("6", "Sync", "Fast-forward local base branches.")
-    table.add_row("7", "Dependency Maintenance", "Audit stacks, Renovate PRs with Ollama, and runtime alignment.")
-    table.add_row("q", "Quit", "Return to your shell.")
+    for item in WORKFLOW_ITEMS:
+        table.add_row(item.key, item.title, item.description)
 
     console.print(table)
 
@@ -226,9 +298,9 @@ def ask_review_repository(repositories: list[tuple[str, str]]) -> tuple[str, str
 
 
 def ask_action_repository(root_dirs: list[str], action: str) -> tuple[str, str] | None:
-    from core.repositories import iter_git_repositories
+    from core.repositories import collect_repositories
 
-    repositories = [repo for root_dir in root_dirs for repo in iter_git_repositories(root_dir)]
+    repositories = collect_repositories(root_dirs)
     if not repositories:
         console.print(
             ui_panel(
@@ -451,15 +523,12 @@ def render_comment_application_report(report) -> None:
 
 
 def run_review_workflow(root_dirs: list[str]) -> None:
-    from core.repositories import iter_git_repositories
+    from core.repositories import collect_repositories
     from core.review import ReviewContextError, collect_review_context, generate_code_review
 
     section_title("Review Code", "🔎")
 
-    repositories: list[tuple[str, str]] = []
-    for root_dir in root_dirs:
-        repositories.extend(iter_git_repositories(root_dir))
-
+    repositories = collect_repositories(root_dirs)
     if not repositories:
         console.print(
             ui_panel(
@@ -502,7 +571,7 @@ def run_review_workflow(root_dirs: list[str]) -> None:
 
 
 def run_comment_workflow(root_dirs: list[str]) -> None:
-    from core.repositories import iter_git_repositories
+    from core.repositories import collect_repositories
     from core.review import (
         ReviewContextError,
         apply_review_comments,
@@ -513,10 +582,7 @@ def run_comment_workflow(root_dirs: list[str]) -> None:
 
     section_title("Comment Code", "💬")
 
-    repositories: list[tuple[str, str]] = []
-    for root_dir in root_dirs:
-        repositories.extend(iter_git_repositories(root_dir))
-
+    repositories = collect_repositories(root_dirs)
     if not repositories:
         console.print(
             ui_panel(
@@ -582,55 +648,13 @@ def run_selected_action(
     if choice == "q":
         return False
 
-    if choice == "1":
-        from core.commit import auto_commit_all_repos
-
-        section_title(f"Auto-Commit {head_branch}", "🔧")
-        selected_repo = ask_action_repository(root_dirs, "Auto Commit")
-        if selected_repo is not None:
-            auto_commit_all_repos(root_dirs, selected_repo_path=selected_repo[1])
-        return True
-
-    if choice == "2":
-        import core.merge as merge
-
-        section_title("Merge Into Base Branches", "🔁")
-        console.print(ui_panel(f"Strategy: {base_branch_strategy}", title="Merge Target", compact=True))
-        selected_repo = ask_action_repository(root_dirs, "Merge")
-        if selected_repo is not None:
-            merge.main(root_dirs, selected_repo_path=selected_repo[1])
-        return True
-
-    if choice == "3":
-        run_review_workflow(root_dirs)
-        return True
-
-    if choice == "4":
-        run_comment_workflow(root_dirs)
-        return True
-
-    if choice == "5":
-        from core.changelog import update_all_repos_interactive
-
-        section_title("Update Changelogs", "📝")
-        update_all_repos_interactive(root_dirs)
-        return True
-
-    if choice == "6":
-        import core.sync as sync
-
-        section_title("Sync Base Branches", "⏳")
-        console.print(ui_panel(sync.describe_sync_plan(), title="Sync Plan", compact=True))
-        sync.main(root_dirs)
-        return True
-
-    if choice == "7":
-        from core.maintenance import run_dependency_maintenance_for_repo
-
-        section_title("Dependency Maintenance", "🛡️")
-        selected_repo = ask_action_repository(root_dirs, "Dependency Maintenance")
-        if selected_repo is not None:
-            run_dependency_maintenance_for_repo(selected_repo[0], selected_repo[1])
+    handler = WORKFLOW_DISPATCH.get(choice)
+    if handler is not None:
+        handler(
+            root_dirs=root_dirs,
+            head_branch=head_branch,
+            base_branch_strategy=base_branch_strategy,
+        )
         return True
 
     return True
