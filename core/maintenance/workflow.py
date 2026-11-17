@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 from rich.progress import (
@@ -311,6 +312,72 @@ def _is_safe_direct_update(pkg: str, update_type: str) -> bool:
     return update_type in {"patch", "minor", "pin", "digest"}
 
 
+def _prompt_update_selection(
+    updates: list[Any],
+    *,
+    item_label: str,
+    title: str,
+    caption: str,
+    prompt_text: str,
+    confirm_text_template: str,
+    current_label: str = "Actuel",
+    target_console: Console | None = None,
+) -> list[Any] | None:
+    out = target_console or console
+    out.print()
+    table = ui_table(title=title, caption=caption)
+    table.add_column("#", justify="right", style="cyan", no_wrap=True)
+    table.add_column(item_label, style="bold white")
+    table.add_column(current_label, style="dim")
+    table.add_column("Cible", style="bold green")
+    table.add_column("Type", justify="center")
+    table.add_column("Risque", style="white")
+
+    for idx, upd in enumerate(updates, start=1):
+        if upd.package.startswith("@nlabrazi/"):
+            risk_label = "[bold green]🟢 Sûr (Outillage @nlabrazi)[/]"
+        elif _is_safe_direct_update(upd.package, upd.update_type):
+            risk_label = "[bold green]🟢 Sûr (Patch/Minor)[/]"
+        else:
+            risk_label = "[bold yellow]🟠 Majeur / À vérifier[/]"
+        table.add_row(
+            str(idx),
+            upd.package,
+            upd.from_version or "?",
+            upd.to_version,
+            upd.update_type,
+            risk_label,
+        )
+    out.print(table)
+
+    mode = Prompt.ask(
+        prompt_text,
+        choices=["1", "2", "3", "q"],
+        default="1",
+        show_choices=False,
+    ).lower()
+    if mode == "q":
+        return None
+
+    if mode == "1":
+        return [u for u in updates if _is_safe_direct_update(u.package, u.update_type)]
+    if mode == "2":
+        selected = []
+        for upd in updates:
+            if ask_yes_no(
+                confirm_text_template.format(
+                    package=upd.package,
+                    from_version=upd.from_version or "?",
+                    to_version=upd.to_version,
+                    update_type=upd.update_type,
+                ),
+                default="y" if _is_safe_direct_update(upd.package, upd.update_type) else "n",
+            ):
+                selected.append(upd)
+        return selected
+    return list(updates)
+
+
 def run_guided_pr_bump_workflow(
     repo_path: str,
     repo_name: str,
@@ -333,56 +400,18 @@ def run_guided_pr_bump_workflow(
             )
             return "no-prs"
 
-        out.print()
-        table = ui_table(
+        selected = _prompt_update_selection(
+            direct_updates,
+            item_label="Paquet",
             title=f"Mises à jour disponibles sur staging · {repo_name}",
             caption="Détectées via le Dependency Dashboard Renovate et npm outdated (0 branche créée).",
+            prompt_text="\n[bold white]Mode de bump sur staging (1=Toutes les sûres, 2=Choisir paquet par paquet, 3=Tout inclure, q=Annuler)[/]",
+            confirm_text_template="Mettre à jour {package} ({from_version} → {to_version}, {update_type}) sur staging ?",
+            current_label="Actuel",
+            target_console=out,
         )
-        table.add_column("#", justify="right", style="cyan", no_wrap=True)
-        table.add_column("Paquet", style="bold white")
-        table.add_column("Actuel", style="dim")
-        table.add_column("Cible", style="bold green")
-        table.add_column("Type", justify="center")
-        table.add_column("Risque", style="white")
-
-        for idx, upd in enumerate(direct_updates, start=1):
-            if upd.package.startswith("@nlabrazi/"):
-                risk_label = "[bold green]🟢 Sûr (Outillage @nlabrazi)[/]"
-            elif _is_safe_direct_update(upd.package, upd.update_type):
-                risk_label = "[bold green]🟢 Sûr (Patch/Minor)[/]"
-            else:
-                risk_label = "[bold yellow]🟠 Majeur / À vérifier[/]"
-            table.add_row(
-                str(idx),
-                upd.package,
-                upd.from_version or "?",
-                upd.to_version,
-                upd.update_type,
-                risk_label,
-            )
-        out.print(table)
-
-        mode = Prompt.ask(
-            "\n[bold white]Mode de bump sur staging (1=Toutes les sûres, 2=Choisir paquet par paquet, 3=Tout inclure, q=Annuler)[/]",
-            choices=["1", "2", "3", "q"],
-            default="1",
-            show_choices=False,
-        ).lower()
-        if mode == "q":
+        if selected is None:
             return "skipped"
-
-        if mode == "1":
-            selected = [u for u in direct_updates if _is_safe_direct_update(u.package, u.update_type)]
-        elif mode == "2":
-            selected = []
-            for upd in direct_updates:
-                if ask_yes_no(
-                    f"Mettre à jour {upd.package} ({upd.from_version or '?'} → {upd.to_version}, {upd.update_type}) sur staging ?",
-                    default="y" if _is_safe_direct_update(upd.package, upd.update_type) else "n",
-                ):
-                    selected.append(upd)
-        else:
-            selected = list(direct_updates)
 
         if not selected:
             out.print(
@@ -469,54 +498,18 @@ def run_ruby_gem_bump_workflow(
         )
         return "up-to-date"
 
-    out.print()
-    table = ui_table(
+    selected = _prompt_update_selection(
+        gem_updates,
+        item_label="Gem",
         title=f"Gems Ruby à mettre à jour sur staging · {repo_name}",
         caption="Détectées via bundle outdated (directes + transitives dans Gemfile.lock, 0 branche créée).",
+        prompt_text="\n[bold white]Mode de bump Gems sur staging (1=Toutes les sûres, 2=Choisir gem par gem, 3=Tout inclure, q=Annuler)[/]",
+        confirm_text_template="Mettre à jour la gem {package} ({from_version} → {to_version}, {update_type}) sur staging ?",
+        current_label="Installée",
+        target_console=out,
     )
-    table.add_column("#", justify="right", style="cyan", no_wrap=True)
-    table.add_column("Gem", style="bold white")
-    table.add_column("Installée", style="dim")
-    table.add_column("Cible", style="bold green")
-    table.add_column("Type", justify="center")
-    table.add_column("Risque", style="white")
-
-    for idx, upd in enumerate(gem_updates, start=1):
-        if _is_safe_direct_update(upd.package, upd.update_type):
-            risk_label = "[bold green]🟢 Sûr (Patch/Minor)[/]"
-        else:
-            risk_label = "[bold yellow]🟠 Majeur / À vérifier[/]"
-        table.add_row(
-            str(idx),
-            upd.package,
-            upd.from_version or "?",
-            upd.to_version,
-            upd.update_type,
-            risk_label,
-        )
-    out.print(table)
-
-    mode = Prompt.ask(
-        "\n[bold white]Mode de bump Gems sur staging (1=Toutes les sûres, 2=Choisir gem par gem, 3=Tout inclure, q=Annuler)[/]",
-        choices=["1", "2", "3", "q"],
-        default="1",
-        show_choices=False,
-    ).lower()
-    if mode == "q":
+    if selected is None:
         return "skipped"
-
-    if mode == "1":
-        selected = [u for u in gem_updates if _is_safe_direct_update(u.package, u.update_type)]
-    elif mode == "2":
-        selected = []
-        for upd in gem_updates:
-            if ask_yes_no(
-                f"Mettre à jour la gem {upd.package} ({upd.from_version or '?'} → {upd.to_version}, {upd.update_type}) sur staging ?",
-                default="y" if _is_safe_direct_update(upd.package, upd.update_type) else "n",
-            ):
-                selected.append(upd)
-    else:
-        selected = list(gem_updates)
 
     if not selected:
         out.print(

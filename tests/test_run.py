@@ -72,6 +72,7 @@ class RunConfigTests(unittest.TestCase):
         self.assertIn("Review Code", output)
         self.assertIn("Comment Code", output)
         self.assertIn("Dependency Maintenance", output)
+        self.assertIn("Code Coverage", output)
         self.assertIn("optionally apply", output)
         self.assertNotIn("Status", output)
         self.assertNotIn("Ready", output)
@@ -519,6 +520,16 @@ class RunConfigTests(unittest.TestCase):
 
         self.assertTrue(should_continue)
         run_maintenance.assert_not_called()
+
+    def test_run_selected_action_dispatches_coverage_workflow(self) -> None:
+        with patch("core.coverage.run_coverage_workflow") as workflow:
+            run.run_selected_action(
+                "8",
+                root_dirs=["/tmp/root"],
+                head_branch="staging",
+                base_branch_strategy="origin/HEAD default branch",
+            )
+        workflow.assert_called_once_with(["/tmp/root"])
 
     def test_run_selected_action_quit_stops_menu_loop(self) -> None:
         should_continue = run.run_selected_action(
