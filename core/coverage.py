@@ -166,20 +166,12 @@ def find_command(root: Path, names: tuple[str, ...]) -> str | None:
     return None
 
 
-def is_unity_project(path: Path | str) -> bool:
-    return (Path(path) / 'ProjectSettings' / 'ProjectVersion.txt').is_file()
-
-
-def find_projects(root: Path, *, exclude_unity: bool | None = None) -> list[Path]:
+def find_projects(root: Path) -> list[Path]:
     if not root.is_dir():
         return []
-    from core.config import is_unity_excluded
-    should_exclude_unity = is_unity_excluded() if exclude_unity is None else exclude_unity
     projects = []
     for entry in sorted(root.iterdir()):
         if entry.is_dir() and entry.name not in SKIP_DIRS:
-            if should_exclude_unity and is_unity_project(entry):
-                continue
             if any((entry / marker).exists() for marker in PROJECT_MARKERS):
                 projects.append(entry)
     return projects
@@ -371,7 +363,7 @@ def analyze_project(path: Path, me: str | None, include_forks: bool) -> Project:
         project.skip = f'fork externe ({owner})'
         return project
 
-    if is_unity_project(path) and not (path / 'package.json').exists():
+    if (path / 'ProjectSettings' / 'ProjectVersion.txt').exists() and not (path / 'package.json').exists():
         project.skip = 'projet Unity (C#)'
         return project
 
@@ -396,13 +388,12 @@ def audit_coverage(
     root_dirs: list[str | Path],
     *,
     include_forks: bool = False,
-    exclude_unity: bool | None = None,
     progress_callback: Any = None,
 ) -> list[Project]:
     paths: list[Path] = []
     for r in root_dirs:
         root_path = Path(r)
-        paths.extend(find_projects(root_path, exclude_unity=exclude_unity))
+        paths.extend(find_projects(root_path))
 
     me = None
     for p in paths:
@@ -424,7 +415,6 @@ def audit_coverage_with_progress(
     root_dirs: list[str | Path],
     *,
     include_forks: bool = False,
-    exclude_unity: bool | None = None,
     description: str = "Audit coverage",
     target_console: Console | None = None,
 ) -> list[Project]:
@@ -452,7 +442,6 @@ def audit_coverage_with_progress(
         return audit_coverage(
             root_dirs,
             include_forks=include_forks,
-            exclude_unity=exclude_unity,
             progress_callback=_on_progress,
         )
 

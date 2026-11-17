@@ -133,8 +133,6 @@ OLLAMA_HOST=http://localhost:11434
 Useful variables:
 
 - `DEVTOOLS_ROOT_DIRS`: root directories to scan.
-- `DEVTOOLS_EXCLUDE_UNITY`: excludes Unity / gaming projects from all workflows (`1` by default). Set to `0` to re-enable them.
-- `DEVTOOLS_INCLUDE_UNITY`: alternative toggle to re-include Unity projects (`1` to enable).
 - `DEVTOOLS_HEAD_BRANCH`: integration branch targeted by auto-commits and merges.
 - `DEVTOOLS_BASE_BRANCH`: forces the base branch instead of using automatic resolution.
 - `DEVTOOLS_REMOTE`: default Git remote.
@@ -142,12 +140,6 @@ Useful variables:
 - `OLLAMA_MAX_REVIEW_DIFF_CHARS`: maximum review diff size sent to Ollama. Default: `12000`.
 - `OLLAMA_MAX_REVIEW_FILE_CHARS`: maximum specific-file content size sent to Ollama. Default: `14000`.
 - `OLLAMA_ALLOW_REMOTE` and `OLLAMA_ALLOW_REMOTE_CONTEXT`: explicit opt-in for remote hosts.
-
-> [!NOTE]
-> **Unity / Gaming projects exclusion**:
-> Unity projects (detected via `ProjectSettings/ProjectVersion.txt`, such as `/mnt/d/Unity/Projects`) are **excluded by default** from all workflows and menu options.
-> - **To keep them hidden (default)**: no action needed, or set `DEVTOOLS_EXCLUDE_UNITY=1` in `.env`.
-> - **To re-include them**: set `DEVTOOLS_INCLUDE_UNITY=1` (or `DEVTOOLS_EXCLUDE_UNITY=0`) in `.env`, or run `python3 run.py --dry-run --include-unity`.
 
 <a name="usage"></a>
 ### ▶️ Usage

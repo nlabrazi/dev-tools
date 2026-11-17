@@ -95,11 +95,6 @@ Ollama:
   OLLAMA_DEBUG                  0, 1, or full
   OLLAMA_DEBUG_MAX_CHARS        Truncated debug preview length. Default: {DEFAULT_DEBUG_MAX_CHARS}
 
-Unity / Gaming projects:
-  DEVTOOLS_EXCLUDE_UNITY        1 to hide/exclude Unity projects (default: 1)
-  DEVTOOLS_INCLUDE_UNITY        1 to include Unity projects (default: 0)
-  CLI flags:                    --include-unity / --exclude-unity
-
 Notes:
   - run.py auto-loads a local .env file if present.
   - shell environment variables override .env values.
@@ -114,17 +109,6 @@ Notes:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--dry-run", action="store_true", help="Simulate actions without mutating repositories")
     group.add_argument("--prod", action="store_true", help="Execute real actions")
-
-    parser.add_argument(
-        "--include-unity",
-        action="store_true",
-        help="Include Unity / gaming projects in workflows (default: excluded)",
-    )
-    parser.add_argument(
-        "--exclude-unity",
-        action="store_true",
-        help="Explicitly exclude Unity / gaming projects from workflows",
-    )
 
     return parser
 
@@ -222,19 +206,15 @@ def render_main_menu(
     head_branch: str,
     base_branch_strategy: str,
 ) -> None:
-    from core.config import is_unity_excluded
-
     root_count = len(root_dirs)
     root_label = "root" if root_count == 1 else "roots"
-    unity_label = "unity: included" if not is_unity_excluded() else "unity: excluded"
 
     console.print(
         ui_panel(
             (
                 f"[bold white]{mode_label}[/]  [dim]·[/]  "
                 f"[cyan]{root_count} {root_label}[/]  [dim]·[/]  "
-                f"head [cyan]{head_branch}[/]  [dim]·[/]  "
-                f"[dim]{unity_label}[/]\n"
+                f"head [cyan]{head_branch}[/]\n"
                 f"[dim]Base branch: {base_branch_strategy}[/]"
             ),
             title="Dev Tools Control Deck",
@@ -693,25 +673,12 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     from utils.common import set_dry_run
-    from core.config import (
-        DEFAULT_HEAD_BRANCH,
-        DEFAULT_REMOTE,
-        describe_base_branch_strategy,
-        resolve_root_dirs,
-        set_exclude_unity,
-    )
+    from core.config import DEFAULT_HEAD_BRANCH, DEFAULT_REMOTE, ROOT_DIRS, describe_base_branch_strategy
 
     if args.dry_run:
         set_dry_run(True)
     elif args.prod:
         set_dry_run(False)
-
-    if getattr(args, "include_unity", False):
-        set_exclude_unity(False)
-    elif getattr(args, "exclude_unity", False):
-        set_exclude_unity(True)
-
-    root_dirs = resolve_root_dirs()
 
     # Banner
     print(f"\n[bold green]{figlet_format('Dev Tools', font='slant')}[/]")
@@ -722,14 +689,14 @@ def main(argv: list[str] | None = None) -> None:
     while True:
         render_main_menu(
             mode_label=mode_label,
-            root_dirs=root_dirs,
+            root_dirs=ROOT_DIRS,
             head_branch=DEFAULT_HEAD_BRANCH,
             base_branch_strategy=base_branch_strategy,
         )
         choice = ask_main_action()
         should_continue = run_selected_action(
             choice,
-            root_dirs=root_dirs,
+            root_dirs=ROOT_DIRS,
             head_branch=DEFAULT_HEAD_BRANCH,
             base_branch_strategy=base_branch_strategy,
         )
