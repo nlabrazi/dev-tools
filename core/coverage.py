@@ -17,7 +17,7 @@ SKIP_DIRS = {
     '.git', 'node_modules', '.nuxt', '.output', '.next', '.venv', 'venv', 'vendor',
     'dist', 'build', 'target', 'out', '.cache', '.turbo', '__pycache__', '.vscode-test',
     'coverage', 'htmlcov', 'test-results', 'playwright-report', '.pytest_cache',
-    'android', 'ios', 'tmp', 'log', 'storage',
+    'android', 'ios', 'tmp', 'log', 'storage', '.nexus-speech', 'site-packages',
 }
 E2E_DIRS = {'e2e', 'e2e-tests'}
 PROJECT_MARKERS = {'.git', 'package.json', 'pyproject.toml', 'Gemfile', 'go.mod', 'Cargo.toml',
