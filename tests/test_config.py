@@ -1,8 +1,17 @@
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from core.config import describe_base_branch_strategy, resolve_repo_base_branch
+from core.config import (
+    describe_base_branch_strategy,
+    is_unity_excluded,
+    is_unity_project,
+    resolve_repo_base_branch,
+    resolve_root_dirs,
+    set_exclude_unity,
+)
 
 
 class BaseBranchResolutionTests(unittest.TestCase):
@@ -58,6 +67,58 @@ class BaseBranchResolutionTests(unittest.TestCase):
 
         self.assertIn("configured branch", description)
         self.assertIn("main", description)
+
+
+class UnityExclusionConfigTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_exclude_unity(None)
+
+    def test_is_unity_project_detects_project_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            self.assertFalse(is_unity_project(root))
+
+            settings = root / "ProjectSettings"
+            settings.mkdir()
+            (settings / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.0f1\n", encoding="utf-8")
+            self.assertTrue(is_unity_project(root))
+
+    def test_is_unity_excluded_defaults_to_true(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            set_exclude_unity(None)
+            self.assertTrue(is_unity_excluded())
+
+    def test_is_unity_excluded_honors_env_vars(self) -> None:
+        with patch.dict(os.environ, {"DEVTOOLS_INCLUDE_UNITY": "1"}, clear=True):
+            set_exclude_unity(None)
+            self.assertFalse(is_unity_excluded())
+
+        with patch.dict(os.environ, {"DEVTOOLS_EXCLUDE_UNITY": "0"}, clear=True):
+            set_exclude_unity(None)
+            self.assertFalse(is_unity_excluded())
+
+        with patch.dict(os.environ, {"DEVTOOLS_EXCLUDE_UNITY": "1"}, clear=True):
+            set_exclude_unity(None)
+            self.assertTrue(is_unity_excluded())
+
+    def test_set_exclude_unity_runtime_override(self) -> None:
+        with patch.dict(os.environ, {"DEVTOOLS_INCLUDE_UNITY": "1"}, clear=True):
+            set_exclude_unity(True)
+            self.assertTrue(is_unity_excluded())
+            set_exclude_unity(False)
+            self.assertFalse(is_unity_excluded())
+
+    def test_resolve_root_dirs_excludes_unity_by_default(self) -> None:
+        with patch.dict(os.environ, {}, clear=True), patch("os.path.isdir", return_value=True):
+            set_exclude_unity(None)
+            roots = resolve_root_dirs()
+            self.assertFalse(any("Unity" in r for r in roots))
+
+    def test_resolve_root_dirs_includes_unity_when_enabled(self) -> None:
+        with patch.dict(os.environ, {"DEVTOOLS_INCLUDE_UNITY": "1"}, clear=True), patch("os.path.isdir", return_value=True):
+            set_exclude_unity(None)
+            roots = resolve_root_dirs()
+            self.assertTrue(any("Unity" in r for r in roots))
 
 
 if __name__ == "__main__":

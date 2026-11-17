@@ -174,6 +174,32 @@ class CoverageCoreTests(unittest.TestCase):
             self.assertEqual(len(projects), 1)
             self.assertEqual(projects[0].name, "my-repo")
 
+    def test_find_projects_excludes_unity_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            web_repo = root / "web-app"
+            web_repo.mkdir()
+            (web_repo / "package.json").write_text("{}", encoding="utf-8")
+
+            unity_repo = root / "unity-game"
+            unity_repo.mkdir()
+            (unity_repo / ".git").mkdir()
+            settings = unity_repo / "ProjectSettings"
+            settings.mkdir()
+            (settings / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3\n", encoding="utf-8")
+
+            # Default: excluded
+            projects = audit_coverage([root], exclude_unity=True)
+            names = [p.name for p in projects]
+            self.assertIn("web-app", names)
+            self.assertNotIn("unity-game", names)
+
+            # Explicit: included
+            projects_included = audit_coverage([root], exclude_unity=False)
+            names_included = [p.name for p in projects_included]
+            self.assertIn("web-app", names_included)
+            self.assertIn("unity-game", names_included)
+
     def test_run_coverage_workflow_quits_cleanly(self) -> None:
         with patch("core.coverage.Prompt.ask", return_value="q"), patch(
             "run.section_title"

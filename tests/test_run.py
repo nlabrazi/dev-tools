@@ -54,6 +54,8 @@ class RunConfigTests(unittest.TestCase):
         self.assertIn("run.py auto-loads a local .env file", help_text)
         self.assertIn("--dry-run", help_text)
         self.assertIn("--prod", help_text)
+        self.assertIn("--include-unity", help_text)
+        self.assertIn("--exclude-unity", help_text)
 
     def test_render_main_menu_includes_review_and_comment_without_status_noise(self) -> None:
         buffer = io.StringIO()

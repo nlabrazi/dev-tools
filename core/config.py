@@ -21,7 +21,36 @@ def _optional_env_name(name: str) -> str | None:
     return value or None
 
 
-def _resolve_root_dirs() -> list[str]:
+_EXCLUDE_UNITY_OVERRIDE: bool | None = None
+
+
+def set_exclude_unity(value: bool | None) -> None:
+    global _EXCLUDE_UNITY_OVERRIDE
+    _EXCLUDE_UNITY_OVERRIDE = value
+
+
+def is_unity_project(path: str | os.PathLike) -> bool:
+    project_version = os.path.join(path, "ProjectSettings", "ProjectVersion.txt")
+    return os.path.isfile(project_version)
+
+
+def is_unity_excluded() -> bool:
+    if _EXCLUDE_UNITY_OVERRIDE is not None:
+        return _EXCLUDE_UNITY_OVERRIDE
+
+    raw_exclude = os.getenv("DEVTOOLS_EXCLUDE_UNITY")
+    if raw_exclude is not None:
+        return raw_exclude.strip().lower() in ("1", "true", "yes", "on")
+
+    raw_include = os.getenv("DEVTOOLS_INCLUDE_UNITY")
+    if raw_include is not None:
+        return raw_include.strip().lower() not in ("1", "true", "yes", "on")
+
+    # Par défaut, les projets gaming Unity sont exclus
+    return True
+
+
+def resolve_root_dirs() -> list[str]:
     raw = os.getenv("DEVTOOLS_ROOT_DIRS", "").strip()
     if raw:
         return [
@@ -30,11 +59,18 @@ def _resolve_root_dirs() -> list[str]:
             if part.strip()
         ]
 
-    return [
+    roots = [
         os.path.expanduser("~/code/pers"),
         os.path.expanduser("~/code/bricolage"),
-        os.path.expanduser("/mnt/d/Unity/Projects"),
     ]
+    unity_dir = os.path.expanduser("/mnt/d/Unity/Projects")
+    if not is_unity_excluded() and os.path.isdir(unity_dir):
+        roots.append(unity_dir)
+    return roots
+
+
+def _resolve_root_dirs() -> list[str]:
+    return resolve_root_dirs()
 
 
 def get_base_branch_override() -> str | None:
