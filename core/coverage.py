@@ -19,7 +19,6 @@ SKIP_DIRS = {
     'dist', 'build', 'target', 'out', '.cache', '.turbo', '__pycache__', '.vscode-test',
     'coverage', 'htmlcov', 'test-results', 'playwright-report', '.pytest_cache',
     'android', 'ios', 'tmp', 'log', 'storage', '.nexus-speech', 'site-packages',
-    'Library', 'UserSettings', 'ProjectSettings', 'Temp', 'obj', 'Logs', 'Bin',
 }
 E2E_DIRS = {'e2e', 'e2e-tests'}
 PROJECT_MARKERS = {'.git', 'package.json', 'pyproject.toml', 'Gemfile', 'go.mod', 'Cargo.toml',
@@ -361,10 +360,6 @@ def analyze_project(path: Path, me: str | None, include_forks: bool) -> Project:
     owner = repo_owner(path) if project.git else None
     if owner and me and owner != me and not include_forks:
         project.skip = f'fork externe ({owner})'
-        return project
-
-    if (path / 'ProjectSettings' / 'ProjectVersion.txt').exists() and not (path / 'package.json').exists():
-        project.skip = 'projet Unity (C#)'
         return project
 
     js, workspaces, py, rb = discover_units(path)
