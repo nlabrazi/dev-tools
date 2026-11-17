@@ -175,6 +175,12 @@ def _handle_maintenance(*, root_dirs: list[str], **_: Any) -> None:
         run_dependency_maintenance_for_repo(selected_repo[0], selected_repo[1])
 
 
+def _handle_coverage(*, root_dirs: list[str], **_: Any) -> None:
+    from core.coverage import run_coverage_workflow
+
+    run_coverage_workflow(root_dirs)
+
+
 WORKFLOW_ITEMS: tuple[WorkflowMenuItem, ...] = (
     WorkflowMenuItem("1", "Auto Commit", "Build, confirm, commit and push staged changes.", _handle_auto_commit),
     WorkflowMenuItem("2", "Merge", "Create and auto-merge release pull requests.", _handle_merge),
@@ -183,6 +189,7 @@ WORKFLOW_ITEMS: tuple[WorkflowMenuItem, ...] = (
     WorkflowMenuItem("5", "Changelog", "Update changelogs from Conventional Commits.", _handle_changelog),
     WorkflowMenuItem("6", "Sync", "Fast-forward local base branches.", _handle_sync),
     WorkflowMenuItem("7", "Dependency Maintenance", "Audit stacks, Renovate PRs with Ollama, and runtime alignment.", _handle_maintenance),
+    WorkflowMenuItem("8", "Code Coverage", "Audit coverage, check gitignores, and run test suites.", _handle_coverage),
     WorkflowMenuItem("q", "Quit", "Return to your shell.", None),
 )
 
