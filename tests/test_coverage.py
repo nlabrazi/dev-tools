@@ -18,6 +18,7 @@ from core.coverage import (
     analyze_py,
     analyze_rb,
     audit_coverage,
+    audit_coverage_with_progress,
     fix_missing_gitignores,
     render_coverage_audit,
     resolve_project_coverage_command,
@@ -133,6 +134,45 @@ class CoverageCoreTests(unittest.TestCase):
             content = gi.read_text(encoding="utf-8")
             self.assertIn("coverage/", content)
             self.assertIn(".coverage", content)
+
+    def test_audit_coverage_calls_progress_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            p1 = root / "repo-a"
+            p1.mkdir()
+            (p1 / "package.json").write_text("{}", encoding="utf-8")
+            p2 = root / "repo-b"
+            p2.mkdir()
+            (p2 / "package.json").write_text("{}", encoding="utf-8")
+
+            calls: list[tuple[int, int, str]] = []
+
+            def on_progress(cur: int, tot: int, name: str) -> None:
+                calls.append((cur, tot, name))
+
+            projects = audit_coverage([root], progress_callback=on_progress)
+            self.assertEqual(len(projects), 2)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0], (1, 2, "repo-a"))
+            self.assertEqual(calls[1], (2, 2, "repo-b"))
+
+    def test_audit_coverage_with_progress_runs_successfully(self) -> None:
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            p1 = root / "my-repo"
+            p1.mkdir()
+            (p1 / "package.json").write_text("{}", encoding="utf-8")
+
+            projects = audit_coverage_with_progress(
+                [root],
+                description="Test Audit",
+                target_console=test_console,
+            )
+            self.assertEqual(len(projects), 1)
+            self.assertEqual(projects[0].name, "my-repo")
 
     def test_run_coverage_workflow_quits_cleanly(self) -> None:
         with patch("core.coverage.Prompt.ask", return_value="q"), patch(
