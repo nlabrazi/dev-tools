@@ -155,14 +155,16 @@ def installed_version(base: Path, package: str) -> str | None:
     return None
 
 
-def find_command(root: Path, names: tuple[str, ...]) -> str | None:
-    for rel in CI_FILES:
-        text = read_text(root / rel)
-        for name in names:
-            m = re.search(rf'({re.escape(name)}[^\r\n;|&]+)', text)
-            if m:
-                return m.group(1).strip()
-    return None
+def find_command(folders: list[Path], pattern: re.Pattern) -> str:
+    for folder in dict.fromkeys(folders):
+        candidates = [folder / n for n in CI_FILES]
+        candidates += sorted((folder / '.github' / 'workflows').glob('*.y*ml'))
+        candidates += sorted(folder.glob('*.sh'))
+        for file in candidates:
+            match = pattern.search(read_text(file)) if file.is_file() else None
+            if match:
+                return f'{match.group(0).strip()} ({file.relative_to(folders[-1]).as_posix()})'
+    return ''
 
 
 def find_projects(root: Path) -> list[Path]:
@@ -206,13 +208,20 @@ def discover_units(path: Path) -> tuple[list[Path], dict[Path, list[Path]], list
 def analyze_js(root: Path, folder: Path, workspaces: list[Path], exclude: set[Path]) -> Unit | None:
     sources = [folder, *workspaces]
     deps: dict[str, Any] = {}
-    scripts: dict[str, str] = {}
+    root_pkg = read_json(folder / 'package.json')
+    root_deps = {**root_pkg.get('dependencies', {}), **root_pkg.get('devDependencies', {})}
+    all_scripts: list[tuple[Path, str, str]] = []
     for source in sources:
         pkg = read_json(source / 'package.json')
-        deps.update({**pkg.get('dependencies', {}), **pkg.get('devDependencies', {})})
-        for s_name, s_cmd in pkg.get('scripts', {}).items():
-            if isinstance(s_cmd, str) and (source == folder or s_name not in scripts):
-                scripts[s_name] = s_cmd
+        for key in ('dependencies', 'devDependencies', 'optionalDependencies'):
+            if isinstance(pkg.get(key), dict):
+                deps.update(pkg[key])
+        if isinstance(pkg.get('scripts'), dict):
+            all_scripts += [
+                (source, s_name, s_cmd)
+                for s_name, s_cmd in pkg['scripts'].items()
+                if isinstance(s_cmd, str)
+            ]
 
     tests, e2e = count_tests(folder, JS_TEST, exclude)
     if not tests:
@@ -220,25 +229,29 @@ def analyze_js(root: Path, folder: Path, workspaces: list[Path], exclude: set[Pa
             return Unit(folder.relative_to(root), 'Playwright', e2e, None)
         return None
 
-    runner = next((name for name, rx in RUNNERS if any(rx.search(s) for s in scripts.values()) or name.lower() in deps), 'Tests JS/TS')
-    script = next((name for name, cmd in scripts.items() if JS_COVERAGE_CMD.search(cmd)), None)
+    runners = [name for name, rx in RUNNERS if any(rx.search(c) for _, _, c in all_scripts)]
+    runner = next((r for r in runners if r != 'Playwright'), None)
+    if not runner:
+        runner = next((name for name, _ in RUNNERS if name.lower() in root_deps), 'Tests JS/TS')
+
+    cov = next(((s, n) for s, n, c in all_scripts if JS_COVERAGE_CMD.search(c)), None)
+    script = cov[1] if cov else None
+    where = cov[0].relative_to(folder).as_posix() if cov and cov[0] != folder else ''
     unit = Unit(folder.relative_to(root), runner, tests, OK, artefacts=('coverage/',))
 
+    def _pkg_version(package: str) -> str | None:
+        return next(filter(None, (installed_version(s, package) for s in sources)), None)
+
     if runner == 'Vitest':
-        v_ver = installed_version(folder, 'vitest') or deps.get('vitest', '')
-        provider = next((p for p in VITEST_PROVIDERS if p in deps), None)
-        transitive = None
-        if not provider and SHARED_VITEST in deps:
-            for cand in VITEST_PROVIDERS:
-                if installed_version(folder, cand):
-                    provider, transitive = cand, SHARED_VITEST
-                    break
-        p_ver = installed_version(folder, provider) if provider else None
+        v_ver = _pkg_version('vitest') or deps.get('vitest', '')
+        provider = next((p for p in VITEST_PROVIDERS if p in deps or _pkg_version(p)), None)
+        transitive = SHARED_VITEST if provider and provider not in root_deps and SHARED_VITEST in deps else None
+        p_ver = _pkg_version(provider) if provider else None
         label_stack = f'Vitest {v_ver}' if v_ver else 'Vitest'
         unit.stack = label_stack
 
         if script:
-            unit.how = f'npm run {script}'
+            unit.how = f'npm run {script}' + (f'  (dans {where}/)' if where else '')
         elif provider:
             unit.status = TODO
             unit.action = 'ajouter "test:coverage": "vitest run --coverage" dans package.json'
@@ -255,28 +268,29 @@ def analyze_js(root: Path, folder: Path, workspaces: list[Path], exclude: set[Pa
         if v_ver and p_ver and v_ver != p_ver:
             unit.notes.append(f'⚠ décalage vitest {v_ver} ≠ provider {p_ver}')
     elif runner == 'Jest':
-        j_ver = installed_version(folder, 'jest') or deps.get('jest', '')
+        j_ver = _pkg_version('jest') or deps.get('jest', '')
         unit.stack = f'Jest {j_ver}'.strip()
         if script:
-            unit.how = f'npm run {script}'
+            unit.how = f'npm run {script}' + (f'  (dans {where}/)' if where else '')
         else:
             unit.status = TODO
             unit.action = 'ajouter "test:coverage": "jest --coverage" dans package.json'
     elif runner == 'node:test':
-        c8_ver = installed_version(folder, 'c8') or deps.get('c8', '')
+        c8_ver = _pkg_version('c8') or deps.get('c8', '')
         unit.stack = 'node:test'
         if script:
-            unit.how = f'npm run {script}'
+            unit.how = f'npm run {script}' + (f'  (dans {where}/)' if where else '')
         elif c8_ver:
             unit.status = TODO
             unit.action = 'ajouter "test:coverage": "c8 npm test" dans package.json'
         else:
             unit.status = INSTALL
-            test_cmd = next((k for k in ('test:unit', 'test') if k in scripts), 'test')
+            script_names = {n for _, n, _ in all_scripts}
+            test_cmd = next((k for k in ('test:unit', 'test') if k in script_names), 'test')
             unit.action = f'npm i -D c8  puis  "test:coverage": "c8 npm run {test_cmd}"'
     else:
         if script:
-            unit.how = f'npm run {script}'
+            unit.how = f'npm run {script}' + (f'  (dans {where}/)' if where else '')
         else:
             unit.status = TODO
             unit.action = 'configurer la commande de coverage dans package.json'
@@ -302,7 +316,7 @@ def analyze_py(root: Path, folder: Path, exclude: set[Path]) -> Unit | None:
                 break
     runner = runner or 'unittest'
 
-    ci_command = find_command(folder, ('coverage run', 'pytest --cov'))
+    ci_command = find_command([folder, root], re.compile(r'coverage\s+run\b|--cov\b'))
     reqs = [folder / f.name for f in folder.iterdir() if REQUIREMENTS.search(f.name)]
     reqs_text = ' '.join(read_text(r) for r in reqs)
     has_cov = any(re.search(rf'^{tool}\b', reqs_text, re.M) for tool in ('coverage', 'pytest-cov'))
@@ -310,7 +324,7 @@ def analyze_py(root: Path, folder: Path, exclude: set[Path]) -> Unit | None:
                          'coverage run' if has_cov else None)
 
     unit = Unit(folder.relative_to(root), runner, tests, OK if how else INSTALL,
-                how=f'{how} (Jenkinsfile)' if ci_command else (how or ''),
+                how=how or '',
                 artefacts=('.coverage', 'htmlcov/'))
 
     target = ('requirements-test.txt' if (folder / 'requirements-test.txt').exists()
@@ -397,6 +411,7 @@ def audit_coverage(
     for r in root_dirs:
         root_path = Path(r)
         paths.extend(find_projects(root_path))
+    paths = sorted(paths, key=lambda p: p.name)
 
     me = None
     for p in paths:
@@ -515,17 +530,9 @@ def render_coverage_audit(
         out.print("  [dim]Sans « / » initial, coverage/ couvre aussi les sous-dossiers (monorepos).[/]")
 
 
-def resolve_project_coverage_command(project: Project) -> tuple[str, Path] | None:
-    """Trouve la commande de test coverage appropriée pour un projet."""
-    if not project.measured:
-        return None
-
-    unit = project.measured[0]
+def resolve_unit_coverage_command(project: Project, unit: Unit) -> tuple[str, Path] | None:
+    """Trouve la commande exécutable de test coverage pour une unité de projet."""
     folder = project.path / unit.rel
-
-    if unit.how:
-        cmd = unit.how.split(' (')[0].strip()
-        return cmd, folder
 
     pkg = read_json(folder / 'package.json')
     scripts = pkg.get('scripts', {})
@@ -534,18 +541,37 @@ def resolve_project_coverage_command(project: Project) -> tuple[str, Path] | Non
     if 'test:cov' in scripts:
         return 'npm run test:cov', folder
 
+    if unit.how and unit.how.startswith('npm run '):
+        cmd = unit.how.split(' (')[0].strip()
+        return cmd, folder
+
     if unit.stack.startswith('Vitest'):
         return 'npx vitest run --coverage', folder
     if unit.stack.startswith('Jest'):
         return 'npx jest --coverage', folder
     if 'pytest' in unit.stack.lower():
-        return 'pytest --cov', folder
+        pytest_bin = '.venv/bin/pytest' if (folder / '.venv' / 'bin' / 'pytest').is_file() else 'pytest'
+        return f'{pytest_bin} --cov', folder
     if 'unittest' in unit.stack.lower():
-        return 'python3 -m coverage run -m unittest discover -v', folder
+        py_bin = '.venv/bin/python' if (folder / '.venv' / 'bin' / 'python').is_file() else 'python3'
+        if (folder / 'tests' / '__main__.py').is_file():
+            return f'{py_bin} -m coverage run --source=core,utils,run -m tests && {py_bin} -m coverage report', folder
+        return f'{py_bin} -m coverage run -m unittest discover -s tests -v && {py_bin} -m coverage report', folder
     if 'rspec' in unit.stack.lower():
         return 'bundle exec rspec', folder
 
+    if unit.how:
+        cmd = unit.how.split(' (')[0].strip()
+        return cmd, folder
+
     return None
+
+
+def resolve_project_coverage_command(project: Project) -> tuple[str, Path] | None:
+    """Trouve la commande de test coverage appropriée pour un projet."""
+    if not project.measured:
+        return None
+    return resolve_unit_coverage_command(project, project.measured[0])
 
 
 def run_repo_coverage(
@@ -554,8 +580,12 @@ def run_repo_coverage(
     target_console: Console | None = None,
 ) -> bool:
     out = target_console or console
-    resolved = resolve_project_coverage_command(project)
-    if not resolved:
+    commands = [
+        (unit, resolved[0], resolved[1])
+        for unit in project.measured
+        if (resolved := resolve_unit_coverage_command(project, unit)) is not None
+    ]
+    if not commands:
         out.print(
             ui_panel(
                 f"Aucune commande de coverage détectée pour {project.name}.",
@@ -566,28 +596,36 @@ def run_repo_coverage(
         )
         return False
 
-    cmd, cwd = resolved
+    details_lines = [f"[bold white]Projet:[/] [cyan]{project.name}[/]"]
+    for unit, cmd, cwd in commands:
+        sub_label = f" ({rel_str(unit.rel)})" if len(commands) > 1 else ""
+        details_lines.append(f"[bold white]Dossier{sub_label}:[/] [dim]{cwd}[/]")
+        details_lines.append(f"[bold white]Commande{sub_label}:[/] [bold green]{cmd}[/]")
+
     out.print(
         ui_panel(
-            f"[bold white]Projet:[/] [cyan]{project.name}[/]\n"
-            f"[bold white]Dossier:[/] [dim]{cwd}[/]\n"
-            f"[bold white]Commande:[/] [bold green]{cmd}[/]",
+            "\n".join(details_lines),
             title="Exécution Coverage",
             compact=True,
         )
     )
 
-    if not ask_yes_no(f"Lancer « {cmd} » maintenant ?", default="y"):
+    prompt_label = commands[0][1] if len(commands) == 1 else f"les {len(commands)} suites de {project.name}"
+    if not ask_yes_no(f"Lancer « {prompt_label} » maintenant ?", default="y"):
         out.print("[yellow]Exécution annulée.[/]")
         return False
 
-    out.print(f"\n[bold cyan]Lancement de « {cmd} »...[/]\n")
-    try:
-        proc = subprocess.run(cmd, cwd=str(cwd), shell=True, check=False)
-        return proc.returncode == 0
-    except OSError as err:
-        out.print(f"[bold red]Erreur d'exécution : {err}[/]")
-        return False
+    all_ok = True
+    for unit, cmd, cwd in commands:
+        out.print(f"\n[bold cyan]Lancement de « {cmd} » ({rel_str(unit.rel)})...[/]\n")
+        try:
+            proc = subprocess.run(cmd, cwd=str(cwd), shell=True, check=False)
+            if proc.returncode != 0:
+                all_ok = False
+        except OSError as err:
+            out.print(f"[bold red]Erreur d'exécution : {err}[/]")
+            all_ok = False
+    return all_ok
 
 
 def fix_missing_gitignores(
@@ -700,7 +738,11 @@ def run_coverage_workflow(root_dirs: list[str]) -> None:
 
             from run import ask_repository
             repo_choices = [(p.name, str(p.path)) for p in measured]
-            selected = ask_repository(repo_choices, title="Lancer Coverage · Choix du Dépôt")
+            selected = ask_repository(
+                repo_choices,
+                title="Lancer Coverage · Choix du Dépôt",
+                caption="Sélectionnez le dépôt pour exécuter sa suite de tests avec couverture.",
+            )
             if selected is not None:
                 target_proj = next(p for p in measured if str(p.path) == selected[1])
                 run_repo_coverage(target_proj)
