@@ -41,7 +41,7 @@ RUNNERS = (
     ('Playwright', re.compile(r'\bplaywright\s+test\b')),
 )
 JS_COVERAGE_CMD = re.compile(
-    r'--coverage\b|\bc8\b|\bnyc\b|--experimental-test-coverage|--test-coverage\b')
+    r'--coverage\b|\bc8\b|\bnyc\b|--experimental-test-coverage|--test-coverage\b|\btest:coverage\b')
 VITEST_PROVIDERS = ('@vitest/coverage-v8', '@vitest/coverage-istanbul')
 SHARED_VITEST = '@nlabrazi/config-vitest'
 
@@ -192,21 +192,29 @@ def discover_units(path: Path) -> tuple[list[Path], dict[Path, list[Path]], list
             patterns = read_json(dirpath / 'package.json').get('workspaces', [])
             if isinstance(patterns, dict):
                 patterns = patterns.get('packages', [])
-            ws = [p for pat in patterns for p in dirpath.glob(pat) if p.is_dir()]
+            ws = sorted({p for pat in patterns if isinstance(pat, str) for p in dirpath.glob(pat) if (p / 'package.json').is_file()})
             if ws:
                 workspaces[dirpath] = ws
         if any(f in PY_FILES or REQUIREMENTS.search(f) for f in filenames):
             py.append(dirpath)
         if 'Gemfile' in filenames:
             rb.append(dirpath)
-    return js, workspaces, py, rb
+    members = {m for group in workspaces.values() for m in group}
+    return [d for d in js if d not in members], workspaces, py, rb
 
 
 def analyze_js(root: Path, folder: Path, workspaces: list[Path], exclude: set[Path]) -> Unit | None:
-    pkg = read_json(folder / 'package.json')
-    deps = {**pkg.get('dependencies', {}), **pkg.get('devDependencies', {})}
-    scripts = pkg.get('scripts', {})
-    tests, e2e = count_tests(folder, JS_TEST, exclude | set(workspaces))
+    sources = [folder, *workspaces]
+    deps: dict[str, Any] = {}
+    scripts: dict[str, str] = {}
+    for source in sources:
+        pkg = read_json(source / 'package.json')
+        deps.update({**pkg.get('dependencies', {}), **pkg.get('devDependencies', {})})
+        for s_name, s_cmd in pkg.get('scripts', {}).items():
+            if isinstance(s_cmd, str) and (source == folder or s_name not in scripts):
+                scripts[s_name] = s_cmd
+
+    tests, e2e = count_tests(folder, JS_TEST, exclude)
     if not tests:
         if e2e:
             return Unit(folder.relative_to(root), 'Playwright', e2e, None)
