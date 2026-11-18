@@ -23,7 +23,8 @@ pipeline {
 
         stage('Unit tests') {
             steps {
-                sh '.venv/bin/python -m tests'
+                sh '.venv/bin/python -m coverage run --source=core,utils,run -m tests'
+                sh '.venv/bin/python -m coverage report'
             }
         }
     }
