@@ -68,7 +68,7 @@ from core.maintenance.reporter import (
     save_audit_report,
 )
 from core.maintenance.validator import run_migration_validations
-from utils.console import ask_yes_no, ui_panel, ui_table
+from utils.console import ask_yes_no, clear_screen, ui_panel, ui_table
 
 console = Console()
 MAINTENANCE_MENU_CHOICES = ("1", "2", "3", "4", "5", "r", "q")
@@ -562,6 +562,7 @@ def run_dependency_maintenance_for_all_repos(
         return []
 
     total = len(repositories)
+    clear_screen(out, label="Dependency Maintenance · ALL")
     out.print(
         ui_panel(
             f"Scan rapide de [bold cyan]{total}[/] dépôts (sans analyse Ollama).",
@@ -611,10 +612,10 @@ def run_dependency_maintenance_for_all_repos(
 
 def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
     existing_journal = load_maintenance_journal(repo_path, repo_name)
+    last_report = _audit_with_progress(repo_path, repo_name, include_ollama_analysis=True)
+    clear_screen(console, label=f"Maintenance · {repo_name}")
     if existing_journal is not None and not existing_journal.is_complete:
         render_maintenance_journal(existing_journal, target_console=console)
-
-    last_report = _audit_with_progress(repo_path, repo_name, include_ollama_analysis=True)
     render_project_dashboard(last_report, target_console=console)
     record_maintenance_step(
         repo_path,
@@ -633,6 +634,7 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
 
         if choice == "r":
             last_report = _audit_with_progress(repo_path, repo_name, include_ollama_analysis=True)
+            clear_screen(console, label=f"Maintenance · {repo_name}")
             render_project_dashboard(last_report, target_console=console)
             continue
 
@@ -707,12 +709,15 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
                         )
                     )
                     continue
+                clear_screen(console, label=f"PR #{pr_number} · {repo_name}")
                 render_renovate_pr_analysis(pr_info, target_console=console)
             elif sub == "2":
+                clear_screen(console, label=f"Plan de migration · {repo_name}")
                 render_risk_assessments(last_report.risk_assessments, target_console=console)
                 if last_report.migration_plan is not None:
                     render_migration_plan(last_report.migration_plan, target_console=console)
             elif sub == "3":
+                clear_screen(console, label=f"Audit complet · {repo_name}")
                 render_audit_report(last_report, target_console=console)
             elif sub == "4":
                 exp_status, paths = save_audit_report(last_report)
