@@ -486,6 +486,30 @@ class RunConfigTests(unittest.TestCase):
         self.assertTrue(should_continue)
         run_comment_workflow.assert_called_once_with(["/tmp/root"])
 
+    def test_ask_repository_supports_all_option_when_enabled(self) -> None:
+        repositories = [("web", "/tmp/web"), ("api", "/tmp/api")]
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+
+        with patch("run.console", test_console), patch("run.Prompt.ask", return_value="a") as prompt:
+            selected = run.ask_repository(repositories, allow_all=True)
+
+        self.assertEqual(selected, [("api", "/tmp/api"), ("web", "/tmp/web")])
+        self.assertIn("ALL", buffer.getvalue())
+        self.assertIn("a", prompt.call_args.kwargs["choices"])
+
+    def test_ask_repository_hides_all_option_by_default(self) -> None:
+        repositories = [("web", "/tmp/web"), ("api", "/tmp/api")]
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+
+        with patch("run.console", test_console), patch("run.Prompt.ask", return_value="1") as prompt:
+            selected = run.ask_repository(repositories)
+
+        self.assertEqual(selected, ("api", "/tmp/api"))
+        self.assertNotIn("ALL", buffer.getvalue())
+        self.assertNotIn("a", prompt.call_args.kwargs["choices"])
+
     def test_run_selected_action_dispatches_dependency_maintenance_workflow(self) -> None:
         with patch(
             "run.ask_action_repository",
@@ -501,8 +525,30 @@ class RunConfigTests(unittest.TestCase):
             )
 
         self.assertTrue(should_continue)
-        ask_repo.assert_called_once_with(["/tmp/root"], "Dependency Maintenance")
+        ask_repo.assert_called_once_with(["/tmp/root"], "Dependency Maintenance", allow_all=True)
         run_maintenance.assert_called_once_with("sjvtdm", "/tmp/root/sjvtdm")
+
+    def test_run_selected_action_dispatches_dependency_maintenance_all_repos(self) -> None:
+        all_repos = [("api", "/tmp/root/api"), ("web", "/tmp/root/web")]
+        with patch(
+            "run.ask_action_repository",
+            return_value=all_repos,
+        ) as ask_repo, patch(
+            "core.maintenance.run_dependency_maintenance_for_all_repos"
+        ) as run_all_maintenance, patch(
+            "core.maintenance.run_dependency_maintenance_for_repo"
+        ) as run_single_maintenance, patch("run.section_title"):
+            should_continue = run.run_selected_action(
+                "7",
+                root_dirs=["/tmp/root"],
+                head_branch="staging",
+                base_branch_strategy="strategy",
+            )
+
+        self.assertTrue(should_continue)
+        ask_repo.assert_called_once_with(["/tmp/root"], "Dependency Maintenance", allow_all=True)
+        run_all_maintenance.assert_called_once_with(all_repos)
+        run_single_maintenance.assert_not_called()
 
     def test_dependency_maintenance_returns_without_action_when_selection_is_cancelled(self) -> None:
         with patch(

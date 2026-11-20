@@ -28,6 +28,7 @@ from core.maintenance.workflow import (
     ask_maintenance_action,
     audit_repository,
     render_maintenance_menu,
+    run_dependency_maintenance_for_all_repos,
     run_dependency_maintenance_for_repo,
     run_guided_pr_bump_workflow,
     run_ruby_gem_bump_workflow,
@@ -474,6 +475,56 @@ class MaintenanceRepoMenuLoopTests(unittest.TestCase):
                 for call in record_step.call_args_list
             )
         )
+
+    def test_run_dependency_maintenance_for_all_repos_scans_without_ollama_and_renders_summary(self) -> None:
+        from dataclasses import replace
+
+        buffer = io.StringIO()
+        out = Console(file=buffer, force_terminal=False, color_system=None, width=140)
+
+        report_ok = replace(_make_report(), repo_name="alpha", overall_status="UP TO DATE")
+        report_urgent = replace(
+            _make_report(),
+            repo_name="beta",
+            overall_status="ACTION REQUIRED (DRIFT OR HIGH-RISK PR)",
+            env_matrix=[
+                EnvironmentMatrixRow(component="Node.js", drift_status=DRIFT_PROBLEMATIC, drift_details="24 vs 26")
+            ],
+        )
+
+        seen_ollama_flags: list[bool] = []
+
+        def fake_audit(repo_path, repo_name, *, include_ollama_analysis, prefix="", target_console=None):
+            seen_ollama_flags.append(include_ollama_analysis)
+            if repo_name == "broken":
+                raise RuntimeError("git boom")
+            return report_ok if repo_name == "alpha" else report_urgent
+
+        with patch("core.maintenance.workflow._audit_with_progress", side_effect=fake_audit), patch(
+            "core.maintenance.workflow.render_project_dashboard"
+        ) as render_dash:
+            reports = run_dependency_maintenance_for_all_repos(
+                [("alpha", "/tmp/alpha"), ("broken", "/tmp/broken"), ("beta", "/tmp/beta")],
+                target_console=out,
+            )
+
+        self.assertEqual([r.repo_name for r in reports], ["alpha", "beta"])
+        self.assertEqual(seen_ollama_flags, [False, False, False])
+        self.assertEqual(render_dash.call_count, 2)
+        output = buffer.getvalue()
+        self.assertIn("Bilan Global · Dependency Maintenance (3 dépôts)", output)
+        self.assertIn("Synthèse Globale Dépendances", output)
+        self.assertIn("ERREUR SCAN", output)
+        self.assertIn("ACTION REQUISE", output)
+        self.assertIn("À JOUR", output)
+
+    def test_run_dependency_maintenance_for_all_repos_handles_empty_list(self) -> None:
+        buffer = io.StringIO()
+        out = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+
+        reports = run_dependency_maintenance_for_all_repos([], target_console=out)
+        self.assertEqual(reports, [])
+        self.assertIn("Aucun dépôt Git", buffer.getvalue())
 
 
 if __name__ == "__main__":

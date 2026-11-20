@@ -54,6 +54,7 @@ from core.maintenance.renovate import (
     inspect_single_renovate_pr,
 )
 from core.maintenance.reporter import (
+    render_all_repos_maintenance_summary,
     render_audit_report,
     render_deployment_checklist,
     render_maintenance_journal,
@@ -277,24 +278,27 @@ def _audit_with_progress(
     repo_name: str,
     *,
     include_ollama_analysis: bool = True,
+    prefix: str = "",
+    target_console: Console | None = None,
 ) -> AuditReport:
-    console.print()
+    out = target_console or console
+    out.print()
     with Progress(
         SpinnerColumn(style="bold cyan"),
         TextColumn("[bold cyan]{task.description}"),
         BarColumn(bar_width=28),
         TaskProgressColumn(),
         TimeElapsedColumn(),
-        console=console,
+        console=out,
         transient=True,
     ) as progress:
         task_id = progress.add_task(
-            f"[{repo_name}] Initialisation de l'analyse...",
+            f"{prefix}[{repo_name}] Initialisation de l'analyse...",
             total=5,
         )
 
         def _on_progress(step: int, message: str) -> None:
-            progress.update(task_id, completed=max(0, step - 1), description=message)
+            progress.update(task_id, completed=max(0, step - 1), description=f"{prefix}{message}")
 
         report = audit_repository(
             repo_path,
@@ -302,7 +306,7 @@ def _audit_with_progress(
             include_ollama_analysis=include_ollama_analysis,
             progress_callback=_on_progress,
         )
-        progress.update(task_id, completed=5, description=f"[{repo_name}] Analyse terminée.")
+        progress.update(task_id, completed=5, description=f"{prefix}[{repo_name}] Analyse terminée.")
     return report
 
 
@@ -537,6 +541,72 @@ def run_ruby_gem_bump_workflow(
         run_maintenance_promote_to_base(repo_path, repo_name, target_console=out)
         return "processed"
     return apply_status
+
+
+def run_dependency_maintenance_for_all_repos(
+    repositories: list[tuple[str, str]],
+    *,
+    include_ollama_analysis: bool = False,
+    target_console: Console | None = None,
+) -> list[AuditReport]:
+    out = target_console or console
+    if not repositories:
+        out.print(
+            ui_panel(
+                "Aucun dépôt Git à scanner.",
+                title="Dependency Maintenance · ALL",
+                tone="warning",
+                compact=True,
+            )
+        )
+        return []
+
+    total = len(repositories)
+    out.print(
+        ui_panel(
+            f"Scan rapide de [bold cyan]{total}[/] dépôts (sans analyse Ollama).",
+            title="Dependency Maintenance · Bilan Global",
+            tone="info",
+            compact=True,
+        )
+    )
+
+    reports: list[AuditReport] = []
+    failed_repos: list[tuple[str, str]] = []
+
+    for idx, (repo_name, repo_path) in enumerate(repositories, start=1):
+        prefix = f"({idx}/{total}) "
+        try:
+            report = _audit_with_progress(
+                repo_path,
+                repo_name,
+                include_ollama_analysis=include_ollama_analysis,
+                prefix=prefix,
+                target_console=out,
+            )
+        except Exception as err:
+            failed_repos.append((repo_name, str(err)))
+            out.rule(f"[bold red]({idx}/{total}) {repo_name}[/]")
+            out.print(
+                ui_panel(
+                    f"Impossible de scanner {repo_name} : {err}",
+                    title=f"Erreur Scan · {repo_name}",
+                    tone="danger",
+                    compact=True,
+                )
+            )
+            continue
+
+        reports.append(report)
+        out.rule(f"[bold cyan]({idx}/{total}) {repo_name}[/]")
+        render_project_dashboard(report, target_console=out)
+
+    render_all_repos_maintenance_summary(
+        reports,
+        failed_repos=failed_repos,
+        target_console=out,
+    )
+    return reports
 
 
 def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:

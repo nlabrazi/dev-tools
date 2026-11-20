@@ -167,12 +167,17 @@ def _handle_sync(*, root_dirs: list[str], **_: Any) -> None:
 
 
 def _handle_maintenance(*, root_dirs: list[str], **_: Any) -> None:
-    from core.maintenance import run_dependency_maintenance_for_repo
+    from core.maintenance import (
+        run_dependency_maintenance_for_all_repos,
+        run_dependency_maintenance_for_repo,
+    )
 
-    section_title("Dependency Maintenance", "🛡️")
-    selected_repo = ask_action_repository(root_dirs, "Dependency Maintenance")
-    if selected_repo is not None:
-        run_dependency_maintenance_for_repo(selected_repo[0], selected_repo[1])
+    section_title("Dependency Maintenance", "📦")
+    selected = ask_action_repository(root_dirs, "Dependency Maintenance", allow_all=True)
+    if isinstance(selected, list):
+        run_dependency_maintenance_for_all_repos(selected)
+    elif selected is not None:
+        run_dependency_maintenance_for_repo(selected[0], selected[1])
 
 
 def _handle_coverage(*, root_dirs: list[str], **_: Any) -> None:
@@ -249,6 +254,7 @@ def render_repository_picker(
     *,
     title: str = "Step 1/2 · Repository",
     caption: str = "Select the repository containing the code to inspect.",
+    allow_all: bool = False,
 ) -> None:
     table = ui_table(
         title=title,
@@ -258,6 +264,12 @@ def render_repository_picker(
     table.add_column("Repository", style="bold white", no_wrap=True)
     table.add_column("Path", style="dim")
 
+    if allow_all:
+        table.add_row(
+            "a",
+            "[bold green]ALL[/]",
+            f"All {len(repositories)} repositories",
+        )
     for index, (repo_name, repo_path) in enumerate(repositories, start=1):
         table.add_row(str(index), repo_name, repo_path)
     table.add_row("q", "Back", "Return to main menu")
@@ -270,7 +282,8 @@ def ask_repository(
     *,
     title: str = "Step 1/2 · Repository",
     caption: str = "Select the repository containing the code to inspect.",
-) -> tuple[str, str] | None:
+    allow_all: bool = False,
+) -> tuple[str, str] | list[tuple[str, str]] | None:
     if not repositories:
         return None
 
@@ -286,8 +299,8 @@ def ask_repository(
         return repositories[0]
 
     repositories = sorted(repositories, key=lambda repo: repo[0].casefold())
-    render_repository_picker(repositories, title=title, caption=caption)
-    choices = [str(index) for index in range(1, len(repositories) + 1)] + ["q"]
+    render_repository_picker(repositories, title=title, caption=caption, allow_all=allow_all)
+    choices = (["a"] if allow_all else []) + [str(index) for index in range(1, len(repositories) + 1)] + ["q"]
     selected = Prompt.ask(
         "\n[bold white]Repository[/]",
         choices=choices,
@@ -297,14 +310,22 @@ def ask_repository(
 
     if selected == "q":
         return None
+    if allow_all and selected == "a":
+        return repositories
     return repositories[int(selected) - 1]
 
 
 def ask_review_repository(repositories: list[tuple[str, str]]) -> tuple[str, str] | None:
-    return ask_repository(repositories)
+    selected = ask_repository(repositories)
+    return selected if isinstance(selected, tuple) else None
 
 
-def ask_action_repository(root_dirs: list[str], action: str) -> tuple[str, str] | None:
+def ask_action_repository(
+    root_dirs: list[str],
+    action: str,
+    *,
+    allow_all: bool = False,
+) -> tuple[str, str] | list[tuple[str, str]] | None:
     from core.repositories import collect_repositories
 
     repositories = collect_repositories(root_dirs)
@@ -321,7 +342,12 @@ def ask_action_repository(root_dirs: list[str], action: str) -> tuple[str, str] 
     return ask_repository(
         repositories,
         title=f"{action} · Repository",
-        caption=f"Select the repository for {action}.",
+        caption=(
+            f"Select a repository or ALL for {action}."
+            if allow_all
+            else f"Select the repository for {action}."
+        ),
+        allow_all=allow_all,
     )
 
 
