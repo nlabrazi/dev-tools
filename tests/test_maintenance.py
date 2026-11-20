@@ -261,6 +261,72 @@ class EnvironmentMatrixTests(unittest.TestCase):
             self.assertEqual(node_row.jenkins, "24")
             self.assertEqual(node_row.drift_status, DRIFT_PROBLEMATIC)
 
+    def test_aligns_compatible_version_ranges_and_wildcards(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / ".nvmrc").write_text("26\n", encoding="utf-8")
+            (root / "package.json").write_text(
+                json.dumps({"engines": {"node": ">=26 <27"}}),
+                encoding="utf-8",
+            )
+            (root / "Jenkinsfile").write_text(
+                "pipeline { agent { docker { image 'node:26-bookworm' } } }\n",
+                encoding="utf-8",
+            )
+            declared = collect_declared_versions(tmp_dir)
+            matrix = build_environment_matrix(tmp_dir, declared)
+            node_row = next(r for r in matrix if r.component == "Node.js")
+            self.assertEqual(node_row.drift_status, DRIFT_ALIGNED)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / ".nvmrc").write_text("24\n", encoding="utf-8")
+            (root / "package.json").write_text(
+                json.dumps({"engines": {"node": "24.x"}}),
+                encoding="utf-8",
+            )
+            (root / "Dockerfile").write_text("FROM node:24-slim-bookworm\n", encoding="utf-8")
+            declared = collect_declared_versions(tmp_dir)
+            matrix = build_environment_matrix(tmp_dir, declared)
+            node_row = next(r for r in matrix if r.component == "Node.js")
+            self.assertEqual(node_row.docker, "24")
+            self.assertEqual(node_row.drift_status, DRIFT_ALIGNED)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "package.json").write_text(
+                json.dumps({"engines": {"node": "^20.19.0 || >=22.12.0"}}),
+                encoding="utf-8",
+            )
+            (root / "Dockerfile").write_text("FROM node:24.22.3-slim\n", encoding="utf-8")
+            wf_dir = root / ".github" / "workflows"
+            wf_dir.mkdir(parents=True)
+            (wf_dir / "ci.yml").write_text('steps:\n  - with:\n      node-version: "24"\n', encoding="utf-8")
+            declared = collect_declared_versions(tmp_dir)
+            matrix = build_environment_matrix(tmp_dir, declared)
+            node_row = next(r for r in matrix if r.component == "Node.js")
+            self.assertEqual(node_row.drift_status, DRIFT_ALIGNED)
+
+    def test_still_flags_incompatible_version_ranges_and_minor_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / ".python-version").write_text("3.10.12\n", encoding="utf-8")
+            (root / "Dockerfile").write_text("FROM python:3.12-slim-bookworm\n", encoding="utf-8")
+            declared = collect_declared_versions(tmp_dir)
+            matrix = build_environment_matrix(tmp_dir, declared)
+            py_row = next(r for r in matrix if r.component == "Python")
+            self.assertEqual(py_row.docker, "3.12")
+            self.assertEqual(py_row.drift_status, DRIFT_PROBLEMATIC)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "pyproject.toml").write_text('requires-python = ">=3.11.5"\n', encoding="utf-8")
+            (root / "Dockerfile").write_text("FROM python:3.11.4-slim\n", encoding="utf-8")
+            declared = collect_declared_versions(tmp_dir)
+            matrix = build_environment_matrix(tmp_dir, declared)
+            py_row = next(r for r in matrix if r.component == "Python")
+            self.assertEqual(py_row.drift_status, DRIFT_PROBLEMATIC)
+
 
 class RenovateAndOllamaPRTests(unittest.TestCase):
     def test_parse_renovate_pr_body_extracts_updates_warnings_and_breaking_notes(self) -> None:

@@ -38,19 +38,26 @@ COMPONENT_MAP = {
 
 def _clean_image_version(raw_tag: str) -> str:
     cleaned = raw_tag.strip().lstrip("v")
-    for suffix in (
+    suffixes = (
         "-bookworm-slim",
         "-bookworm",
         "-bullseye-slim",
         "-bullseye",
+        "-trixie-slim",
+        "-trixie",
         "-slim",
         "-alpine",
         "-noble",
         "-jammy",
-    ):
-        if cleaned.endswith(suffix):
-            cleaned = cleaned[: -len(suffix)]
-            break
+    )
+    changed = True
+    while changed:
+        changed = False
+        for suffix in suffixes:
+            if cleaned.endswith(suffix):
+                cleaned = cleaned[: -len(suffix)]
+                changed = True
+                break
     return cleaned
 
 
@@ -329,6 +336,142 @@ def _unique_ordered(values: list[str]) -> list[str]:
     return result
 
 
+_VERSION_INF = 10**9
+_VersionTuple = tuple[int, int, int]
+_VersionInterval = tuple[_VersionTuple, _VersionTuple]
+_COMPARATOR_RE = re.compile(
+    r"^(>=|<=|>|<|==|=|\^|~)?\s*v?(\d+)(?:\.(\d+|[xX*]))?(?:\.(\d+|[xX*]))?$"
+)
+
+
+def _parse_single_constraint(raw: str) -> _VersionInterval | None:
+    match = _COMPARATOR_RE.match(raw.strip())
+    if not match:
+        return None
+
+    op = match.group(1) or ""
+    major = int(match.group(2))
+    raw_minor = match.group(3)
+    raw_patch = match.group(4)
+    minor = None if raw_minor in {None, "x", "X", "*"} else int(raw_minor)
+    patch = None if raw_patch in {None, "x", "X", "*"} else int(raw_patch)
+
+    zero_ver: _VersionTuple = (0, 0, 0)
+    inf_ver: _VersionTuple = (_VERSION_INF, 0, 0)
+
+    if op in {"", "=", "=="}:
+        if minor is None:
+            return ((major, 0, 0), (major + 1, 0, 0))
+        if patch is None:
+            return ((major, minor, 0), (major, minor + 1, 0))
+        return ((major, minor, patch), (major, minor, patch + 1))
+
+    if op == ">=":
+        return ((major, minor or 0, patch or 0), inf_ver)
+
+    if op == ">":
+        if minor is None:
+            return ((major + 1, 0, 0), inf_ver)
+        if patch is None:
+            return ((major, minor + 1, 0), inf_ver)
+        return ((major, minor, patch + 1), inf_ver)
+
+    if op == "<":
+        return (zero_ver, (major, minor or 0, patch or 0))
+
+    if op == "<=":
+        if minor is None:
+            return (zero_ver, (major + 1, 0, 0))
+        if patch is None:
+            return (zero_ver, (major, minor + 1, 0))
+        return (zero_ver, (major, minor, patch + 1))
+
+    if op == "^":
+        low = (major, minor or 0, patch or 0)
+        if major > 0:
+            high = (major + 1, 0, 0)
+        elif minor is not None and minor > 0:
+            high = (0, minor + 1, 0)
+        elif patch is not None:
+            high = (0, 0, patch + 1)
+        else:
+            high = (1, 0, 0)
+        return (low, high)
+
+    if op == "~":
+        low = (major, minor or 0, patch or 0)
+        high = (major + 1, 0, 0) if minor is None else (major, minor + 1, 0)
+        return (low, high)
+
+    return None
+
+
+def _intersect_interval_sets(
+    left: list[_VersionInterval],
+    right: list[_VersionInterval],
+) -> list[_VersionInterval]:
+    result: list[_VersionInterval] = []
+    for l_start, l_end in left:
+        for r_start, r_end in right:
+            start = max(l_start, r_start)
+            end = min(l_end, r_end)
+            if start < end:
+                result.append((start, end))
+    return result
+
+
+def _parse_version_spec(spec: str) -> list[_VersionInterval] | None:
+    """Parse a version or semver/PEP-440 constraint into a union of half-open intervals."""
+    or_branches = [branch.strip() for branch in spec.split("||") if branch.strip()]
+    if not or_branches:
+        return None
+
+    union_intervals: list[_VersionInterval] = []
+    for branch in or_branches:
+        normalized = re.sub(r"(>=|<=|==|[><=^~])\s+", r"\1", branch)
+        atoms = [atom for atom in normalized.split() if atom]
+        if not atoms:
+            return None
+
+        branch_intervals: list[_VersionInterval] = [((0, 0, 0), (_VERSION_INF, 0, 0))]
+        for atom in atoms:
+            interval = _parse_single_constraint(atom)
+            if interval is None:
+                return None
+            branch_intervals = _intersect_interval_sets(branch_intervals, [interval])
+        union_intervals.extend(branch_intervals)
+
+    return union_intervals
+
+
+def _canonical_aligned_label(raw_specs: list[str]) -> str:
+    """Choose the cleanest concrete version label among aligned specs."""
+    concrete = [
+        spec.strip().lstrip("v")
+        for spec in raw_specs
+        if re.fullmatch(r"v?\d+(?:\.\d+){0,2}", spec.strip())
+    ]
+    if concrete:
+        return max(concrete, key=lambda v: (v.count("."), len(v)))
+    return raw_specs[0].strip()
+
+
+def _specs_are_compatible(raw_specs: list[str]) -> bool | None:
+    """Return True if all parsed specs share at least one version, False if disjoint, None if unparseable."""
+    if not raw_specs:
+        return None
+
+    combined: list[_VersionInterval] = [((0, 0, 0), (_VERSION_INF, 0, 0))]
+    for spec in raw_specs:
+        parsed = _parse_version_spec(spec)
+        if parsed is None:
+            return None
+        combined = _intersect_interval_sets(combined, parsed)
+        if not combined:
+            return False
+    return True
+
+
 def _comparable_tokens(version_str: str) -> list[str]:
     tokens: list[str] = []
     for part in version_str.split(","):
@@ -350,6 +493,14 @@ def _versions_are_aligned(component: str, env_values: dict[str, str]) -> tuple[s
     if not known_envs:
         return DRIFT_INFO_UNAVAILABLE, "No declared version detected across local/CI files."
 
+    raw_specs = _unique_ordered(
+        [
+            part.strip()
+            for val in known_envs.values()
+            for part in val.split(",")
+            if part.strip() and part.strip() not in {STATUS_UNKNOWN, "N/A"}
+        ]
+    )
     token_map = {env: _comparable_tokens(val) for env, val in known_envs.items()}
     all_tokens = _unique_ordered([tok for toks in token_map.values() for tok in toks])
 
@@ -360,10 +511,12 @@ def _versions_are_aligned(component: str, env_values: dict[str, str]) -> tuple[s
             f"Declared only in {only_env} ({known_envs[only_env]}); other environments not configured or unknown.",
         )
 
-    if len(all_tokens) == 1:
+    compatible = _specs_are_compatible(raw_specs)
+    if len(all_tokens) == 1 or compatible is True:
+        label = _canonical_aligned_label(raw_specs) if compatible is True else all_tokens[0]
         return (
             DRIFT_ALIGNED,
-            f"Aligned on {all_tokens[0]} across {', '.join(known_envs.keys())} (Production: {env_values.get('Production', STATUS_UNKNOWN)}).",
+            f"Aligned on {label} across {', '.join(known_envs.keys())} (Production: {env_values.get('Production', STATUS_UNKNOWN)}).",
         )
 
     if component == "PostgreSQL":
