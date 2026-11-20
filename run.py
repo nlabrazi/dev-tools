@@ -10,7 +10,7 @@ from rich import print
 from rich.console import Console
 from rich.prompt import Prompt
 
-from utils.console import ui_panel, ui_table
+from utils.console import clear_screen, ui_panel, ui_table
 
 console = Console()
 REVIEW_TARGET_CHOICES = ("1", "2", "3", "4", "5", "q")
@@ -77,6 +77,7 @@ Main environment variables:
   DEVTOOLS_HEAD_BRANCH          Integration branch. Current default: {DEFAULT_HEAD_BRANCH}
   DEVTOOLS_BASE_BRANCH          Force a base branch instead of resolving origin/HEAD
   DEVTOOLS_GIT_TIMEOUT          Git command timeout in seconds. Default: {DEFAULT_GIT_TIMEOUT}
+  DEVTOOLS_NO_CLEAR             Set to 1 to disable screen clearing transitions
   GH_PR_MERGE_TIMEOUT           Wait for effective PR merge. Default: 90
 
 Ollama:
@@ -114,7 +115,8 @@ Notes:
 
 
 def section_title(title: str, emoji: str) -> None:
-    print("\n")
+    if not clear_screen(console, label=title):
+        print("\n")
     console.print(
         ui_panel(
             f"{emoji}  [bold white]{title.upper()}[/]",
@@ -600,6 +602,7 @@ def run_review_workflow(root_dirs: list[str]) -> None:
     with console.status("[bold cyan]Generating French review explanation...[/]", spinner="dots"):
         explanation = generate_code_review(repo_name, context)
 
+    clear_screen(console, label=f"Review · {repo_name}")
     render_code_review_explanation(repo_name, context, explanation)
 
 
@@ -652,6 +655,7 @@ def run_comment_workflow(root_dirs: list[str]) -> None:
     with console.status("[bold cyan]Generating source comment suggestions...[/]", spinner="dots"):
         plan = generate_review_comments(repo_name, context)
 
+    clear_screen(console, label=f"Comments · {repo_name}")
     render_comment_plan(repo_name, context, plan)
 
     if not plan.has_comments:

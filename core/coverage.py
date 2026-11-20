@@ -10,7 +10,7 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn
 from rich.prompt import Prompt
 
-from utils.console import ask_yes_no, ui_panel, ui_table
+from utils.console import ask_yes_no, clear_screen, ui_panel, ui_table
 
 console = Console()
 
@@ -616,6 +616,7 @@ def run_repo_coverage(
         if not ask_yes_no(f"Lancer « {prompt_label} » maintenant ?", default="y"):
             out.print("[yellow]Exécution annulée.[/]")
             return False
+        clear_screen(out, label=f"Coverage · {project.name}")
 
     all_ok = True
     for unit, cmd, cwd in commands:
@@ -664,6 +665,7 @@ def run_all_repos_coverage(
         out.print("[yellow]Exécution annulée.[/]")
         return []
 
+    clear_screen(out, label="Coverage · ALL")
     results: list[tuple[str, bool]] = []
     total = len(ordered)
     for idx, proj in enumerate(ordered, start=1):
@@ -800,6 +802,7 @@ def run_coverage_workflow(root_dirs: list[str]) -> None:
                 root_dirs,
                 description="Audit coverage",
             )
+            clear_screen(console, label="Audit Coverage")
             render_coverage_audit(projects, details=(choice == "2"))
 
         elif choice == "3":
