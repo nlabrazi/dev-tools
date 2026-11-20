@@ -577,6 +577,7 @@ def resolve_project_coverage_command(project: Project) -> tuple[str, Path] | Non
 def run_repo_coverage(
     project: Project,
     *,
+    skip_confirm: bool = False,
     target_console: Console | None = None,
 ) -> bool:
     out = target_console or console
@@ -610,10 +611,11 @@ def run_repo_coverage(
         )
     )
 
-    prompt_label = commands[0][1] if len(commands) == 1 else f"les {len(commands)} suites de {project.name}"
-    if not ask_yes_no(f"Lancer « {prompt_label} » maintenant ?", default="y"):
-        out.print("[yellow]Exécution annulée.[/]")
-        return False
+    if not skip_confirm:
+        prompt_label = commands[0][1] if len(commands) == 1 else f"les {len(commands)} suites de {project.name}"
+        if not ask_yes_no(f"Lancer « {prompt_label} » maintenant ?", default="y"):
+            out.print("[yellow]Exécution annulée.[/]")
+            return False
 
     all_ok = True
     for unit, cmd, cwd in commands:
@@ -626,6 +628,80 @@ def run_repo_coverage(
             out.print(f"[bold red]Erreur d'exécution : {err}[/]")
             all_ok = False
     return all_ok
+
+
+def run_all_repos_coverage(
+    projects: list[Project],
+    *,
+    target_console: Console | None = None,
+) -> list[tuple[str, bool]]:
+    out = target_console or console
+    if not projects:
+        out.print(
+            ui_panel(
+                "Aucun projet mesurable à exécuter.",
+                title="Coverage · ALL",
+                tone="warning",
+                compact=True,
+            )
+        )
+        return []
+
+    ordered = sorted(projects, key=lambda p: p.name.casefold())
+    names_preview = ", ".join(p.name for p in ordered)
+    out.print(
+        ui_panel(
+            f"[bold white]Projets ({len(ordered)}):[/] [cyan]{names_preview}[/]",
+            title="Exécution Coverage · ALL",
+            compact=True,
+        )
+    )
+
+    if not ask_yes_no(
+        f"Lancer les tests avec coverage sur les {len(ordered)} projets maintenant ?",
+        default="y",
+    ):
+        out.print("[yellow]Exécution annulée.[/]")
+        return []
+
+    results: list[tuple[str, bool]] = []
+    total = len(ordered)
+    for idx, proj in enumerate(ordered, start=1):
+        out.print()
+        out.rule(f"[bold cyan]({idx}/{total}) {proj.name}[/]")
+        ok = run_repo_coverage(proj, skip_confirm=True, target_console=out)
+        results.append((proj.name, ok))
+
+    table = ui_table(
+        title=f"Bilan Coverage · Tous les Projets ({total})",
+        show_lines=True,
+    )
+    table.add_column("Projet", style="bold white", no_wrap=True)
+    table.add_column("Suites", justify="center", style="cyan", no_wrap=True)
+    table.add_column("Statut", justify="center", no_wrap=True)
+
+    suites_by_name = {p.name: len(p.measured) for p in ordered}
+    passed = 0
+    for proj_name, ok in results:
+        if ok:
+            passed += 1
+        badge = "[bold green]✔ PASS[/]" if ok else "[bold red]✖ FAIL[/]"
+        table.add_row(proj_name, str(suites_by_name.get(proj_name, 0)), badge)
+
+    out.print()
+    out.print(table)
+
+    failed = total - passed
+    tone = "success" if failed == 0 else "danger"
+    out.print(
+        ui_panel(
+            f"[bold green]✔ {passed} réussi(s)[/]   [bold red]✖ {failed} en échec[/]   [dim]({total} au total)[/]",
+            title="Synthèse Globale Coverage",
+            tone=tone,
+            compact=True,
+        )
+    )
+    return results
 
 
 def fix_missing_gitignores(
@@ -741,9 +817,14 @@ def run_coverage_workflow(root_dirs: list[str]) -> None:
             selected = ask_repository(
                 repo_choices,
                 title="Lancer Coverage · Choix du Dépôt",
-                caption="Sélectionnez le dépôt pour exécuter sa suite de tests avec couverture.",
+                caption="Sélectionnez un dépôt ou ALL pour exécuter les tests avec couverture.",
+                allow_all=True,
             )
-            if selected is not None:
+            if isinstance(selected, list):
+                selected_paths = {path for _, path in selected}
+                target_projects = [p for p in measured if str(p.path) in selected_paths]
+                run_all_repos_coverage(target_projects)
+            elif selected is not None:
                 target_proj = next(p for p in measured if str(p.path) == selected[1])
                 run_repo_coverage(target_proj)
 

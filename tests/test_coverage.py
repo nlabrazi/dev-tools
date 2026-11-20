@@ -22,6 +22,7 @@ from core.coverage import (
     fix_missing_gitignores,
     render_coverage_audit,
     resolve_project_coverage_command,
+    run_all_repos_coverage,
     run_coverage_workflow,
     run_repo_coverage,
 )
@@ -179,6 +180,68 @@ class CoverageCoreTests(unittest.TestCase):
             "run.section_title"
         ):
             run_coverage_workflow(["/tmp/root"])
+
+    def test_run_all_repos_coverage_confirms_once_and_renders_summary(self) -> None:
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+
+        p1 = Project(path=Path("/tmp/beta"))
+        p1.units = [Unit(rel=Path("."), stack="Vitest", tests=4, status=OK, how="npm run test:coverage")]
+        p2 = Project(path=Path("/tmp/alpha"))
+        p2.units = [Unit(rel=Path("."), stack="pytest", tests=3, status=OK, how="pytest --cov")]
+
+        with patch("core.coverage.ask_yes_no", return_value=True) as confirm, patch(
+            "core.coverage.run_repo_coverage",
+            side_effect=[True, False],
+        ) as run_single:
+            results = run_all_repos_coverage([p1, p2], target_console=test_console)
+
+        confirm.assert_called_once()
+        self.assertEqual(results, [("alpha", True), ("beta", False)])
+        self.assertEqual(run_single.call_count, 2)
+        for call in run_single.call_args_list:
+            self.assertTrue(call.kwargs["skip_confirm"])
+        output = " ".join(buffer.getvalue().split())
+        self.assertIn("Bilan Coverage · Tous les Projets (2)", output)
+        self.assertIn("Synthèse Globale Coverage", output)
+        self.assertIn("1 réussi(s)", output)
+        self.assertIn("1 en échec", output)
+
+    def test_run_all_repos_coverage_cancels_when_declined(self) -> None:
+        buffer = io.StringIO()
+        test_console = Console(file=buffer, force_terminal=False, color_system=None, width=120)
+        p1 = Project(path=Path("/tmp/alpha"))
+        p1.units = [Unit(rel=Path("."), stack="Vitest", tests=4, status=OK, how="npm run test:coverage")]
+
+        with patch("core.coverage.ask_yes_no", return_value=False), patch(
+            "core.coverage.run_repo_coverage"
+        ) as run_single:
+            results = run_all_repos_coverage([p1], target_console=test_console)
+
+        self.assertEqual(results, [])
+        run_single.assert_not_called()
+
+    def test_run_coverage_workflow_option_3_dispatches_all_repos(self) -> None:
+        p1 = Project(path=Path("/tmp/alpha"))
+        p1.units = [Unit(rel=Path("."), stack="Vitest", tests=4, status=OK, how="npm run test:coverage")]
+        p2 = Project(path=Path("/tmp/beta"))
+        p2.units = [Unit(rel=Path("."), stack="pytest", tests=3, status=OK, how="pytest --cov")]
+
+        with patch("core.coverage.Prompt.ask", side_effect=["3", "q"]), patch(
+            "run.section_title"
+        ), patch(
+            "core.coverage.audit_coverage_with_progress",
+            return_value=[p1, p2],
+        ), patch(
+            "run.ask_repository",
+            return_value=[("alpha", "/tmp/alpha"), ("beta", "/tmp/beta")],
+        ) as ask_repo, patch(
+            "core.coverage.run_all_repos_coverage"
+        ) as run_all:
+            run_coverage_workflow(["/tmp/root"])
+
+        self.assertTrue(ask_repo.call_args.kwargs["allow_all"])
+        run_all.assert_called_once_with([p1, p2])
 
 
 if __name__ == "__main__":

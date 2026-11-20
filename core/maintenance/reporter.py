@@ -240,6 +240,127 @@ def render_project_dashboard(report: AuditReport, *, target_console: Console | N
         )
 
 
+_OVERALL_STATUS_PRIORITY = {
+    "ACTION REQUIRED (DRIFT OR HIGH-RISK PR)": 0,
+    "RENOVATE NOT CONFIGURED": 1,
+    "MAINTENANCE IN PROGRESS (OPEN OR PENDING UPDATES)": 2,
+    "AWAITING FINAL RUNTIME / CI CHECK": 3,
+    "UP TO DATE": 4,
+}
+
+
+def _overall_status_badge(status: str) -> str:
+    badges = {
+        "ACTION REQUIRED (DRIFT OR HIGH-RISK PR)": "[bold red]🔴 ACTION REQUISE[/]",
+        "RENOVATE NOT CONFIGURED": "[bold red]❌ RENOVATE ABSENT[/]",
+        "MAINTENANCE IN PROGRESS (OPEN OR PENDING UPDATES)": "[bold yellow]🟠 MISES À JOUR[/]",
+        "AWAITING FINAL RUNTIME / CI CHECK": "[bold yellow]🟡 À VÉRIFIER[/]",
+        "UP TO DATE": "[bold green]✅ À JOUR[/]",
+    }
+    return badges.get(status, f"[white]{status}[/]")
+
+
+def render_all_repos_maintenance_summary(
+    reports: list[AuditReport],
+    *,
+    failed_repos: list[tuple[str, str]] | None = None,
+    target_console: Console | None = None,
+) -> None:
+    out = target_console or console
+    failures = failed_repos or []
+
+    sorted_reports = sorted(
+        reports,
+        key=lambda r: (_OVERALL_STATUS_PRIORITY.get(r.overall_status, 99), r.repo_name.casefold()),
+    )
+
+    table = ui_table(
+        title=f"Bilan Global · Dependency Maintenance ({len(reports) + len(failures)} dépôts)",
+        caption="Trié par priorité (urgences et mises à jour en tête).",
+        show_lines=True,
+    )
+    table.add_column("Dépôt", style="bold white", no_wrap=True)
+    table.add_column("Renovate", no_wrap=True)
+    table.add_column("Runtimes")
+    table.add_column("PRs / Pending", justify="center", no_wrap=True)
+    table.add_column("CI", justify="center", no_wrap=True)
+    table.add_column("Statut", no_wrap=True)
+
+    for repo_name, error_msg in failures:
+        table.add_row(
+            repo_name,
+            "[dim]-[/]",
+            f"[red]{error_msg}[/]",
+            "[dim]-[/]",
+            "[dim]-[/]",
+            "[bold red]✖ ERREUR SCAN[/]",
+        )
+
+    counts = {"urgent": len(failures), "updates": 0, "check": 0, "ok": 0}
+    for report in sorted_reports:
+        rc = report.renovate_config
+        if not rc.exists:
+            renovate_cell = "[bold red]❌ Absent[/]"
+        elif not rc.valid_json:
+            renovate_cell = "[bold red]❌ JSON invalide[/]"
+        elif rc.extends_dev_platform:
+            renovate_cell = "[green]✅ Preset[/]"
+        else:
+            renovate_cell = "[yellow]🟡 Local[/]"
+
+        drifted = [row.component for row in report.env_matrix if row.drift_status == DRIFT_PROBLEMATIC]
+        if drifted:
+            runtime_cell = f"[bold red]🔴 Désaligné ({', '.join(drifted)})[/]"
+        elif report.env_matrix and all(row.drift_status in {DRIFT_ALIGNED, DRIFT_ACCEPTED} for row in report.env_matrix):
+            runtime_cell = "[green]🟢 Aligné[/]"
+        elif report.env_matrix:
+            runtime_cell = "[dim]⚪ Partiel[/]"
+        else:
+            runtime_cell = "[dim]-[/]"
+
+        open_count = len(report.open_prs)
+        pending_count = len(report.dashboard.pending_or_rate_limited_items)
+        parts: list[str] = []
+        if open_count:
+            parts.append(f"[bold cyan]{open_count} PR[/]")
+        if pending_count:
+            parts.append(f"[yellow]{pending_count} pending[/]")
+        updates_cell = " · ".join(parts) if parts else "[green]0[/]"
+
+        ci_cell = _status_badge(report.ci_summary.github_actions_status)
+        status_cell = _overall_status_badge(report.overall_status)
+
+        if report.overall_status in {"ACTION REQUIRED (DRIFT OR HIGH-RISK PR)", "RENOVATE NOT CONFIGURED"}:
+            counts["urgent"] += 1
+        elif report.overall_status == "MAINTENANCE IN PROGRESS (OPEN OR PENDING UPDATES)":
+            counts["updates"] += 1
+        elif report.overall_status == "UP TO DATE":
+            counts["ok"] += 1
+        else:
+            counts["check"] += 1
+
+        table.add_row(
+            report.repo_name,
+            renovate_cell,
+            runtime_cell,
+            updates_cell,
+            ci_cell,
+            status_cell,
+        )
+
+    out.print()
+    out.print(table)
+
+    summary_line = (
+        f"[bold red]🔴 {counts['urgent']} urgent(s)[/]   "
+        f"[bold yellow]🟠 {counts['updates']} à mettre à jour[/]   "
+        f"[yellow]🟡 {counts['check']} à vérifier[/]   "
+        f"[bold green]✅ {counts['ok']} à jour[/]"
+    )
+    tone = "danger" if counts["urgent"] else ("warning" if (counts["updates"] or counts["check"]) else "success")
+    out.print(ui_panel(summary_line, title="Synthèse Globale Dépendances", tone=tone, compact=True))
+
+
 def render_renovate_pr_analysis(pr: RenovatePRInfo, *, target_console: Console | None = None) -> None:
     out = target_console or console
     analysis = pr.analysis
