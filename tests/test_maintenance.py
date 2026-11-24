@@ -1028,7 +1028,7 @@ class MaintenanceGitWorkflowIntegrationTests(unittest.TestCase):
             proposals = prepare_migration_changes(report)
             self.assertEqual(len(proposals), 1)
             self.assertEqual(proposals[0].path, "renovate.json")
-            self.assertIn("npm.pkg.github.com", proposals[0].new_content)
+            self.assertNotIn("npmrc", proposals[0].new_content)
 
             with patch(
                 "core.maintenance.detector.git_output",
@@ -1064,7 +1064,7 @@ class MaintenanceGitWorkflowIntegrationTests(unittest.TestCase):
             self.assertTrue((root / "renovate.json").is_file())
             written = json.loads((root / "renovate.json").read_text(encoding="utf-8"))
             self.assertIn("github>nlabrazi/dev-platform//configs/renovate/base", written["extends"])
-            self.assertEqual(written["npmrc"], "@nlabrazi:registry=https://npm.pkg.github.com/")
+            self.assertNotIn("npmrc", written)
 
 
 class ProductionInspectionTests(unittest.TestCase):
@@ -1359,6 +1359,54 @@ class MaintenanceSessionResumeTests(unittest.TestCase):
             ), patch("core.maintenance.git_ops.run_command", return_value=bundle_update):
                 gem_status = apply_ruby_gem_updates(tmp_dir, "sample-app", [gem_updates[0]], target_console=test_console)
             self.assertEqual(gem_status, "applied")
+
+    def test_dashboard_lookup_warnings_and_workspace_npm_outdated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "package.json").write_text(
+                json.dumps({"name": "dev-platform", "private": True, "workspaces": ["packages/*"]}),
+                encoding="utf-8",
+            )
+            dashboard_issue = [
+                {
+                    "number": 50,
+                    "title": "Dependency Dashboard",
+                    "state": "OPEN",
+                    "body": (
+                        "## Pending Approval\n"
+                        " - [ ] <!-- approve-all-pending-prs -->Create all\n"
+                        "> [!WARNING]\n"
+                        "> Renovate failed to look up the following dependencies: "
+                        "`Failed to look up npm package @nlabrazi/config-vitest: no-result`.\n"
+                    ),
+                }
+            ]
+            issue_gh = subprocess.CompletedProcess(
+                args=["gh"], returncode=0, stdout=json.dumps(dashboard_issue), stderr=""
+            )
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch("core.maintenance.detector.git_output", return_value="staging"), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", side_effect=[issue_gh, empty_gh]):
+                report = audit_repository(tmp_dir, "dev-platform", include_ollama_analysis=False)
+
+            self.assertEqual(report.dashboard.lookup_warnings, ["@nlabrazi/config-vitest"])
+            self.assertEqual(report.dashboard.pending_or_rate_limited_items, [])
+            self.assertTrue(any("lookup warning" in r.lower() for r in report.reservations))
+
+            ws_outdated = subprocess.CompletedProcess(
+                args=["npm", "outdated", "--workspaces", "--json"],
+                returncode=1,
+                stdout=json.dumps(
+                    {"@playwright/test": {"current": "1.63.0", "wanted": "1.65.1", "latest": "1.65.1"}}
+                ),
+                stderr="",
+            )
+            with patch("core.maintenance.git_ops.run_command", return_value=ws_outdated) as mock_run:
+                updates = collect_direct_staging_updates(tmp_dir, report)
+            mock_run.assert_called_once_with(["npm", "outdated", "--workspaces", "--json"], cwd=tmp_dir, silent=True)
+            self.assertEqual([(u.package, u.to_version, u.update_type) for u in updates], [("@playwright/test", "1.65.1", "minor")])
 
 
 if __name__ == "__main__":

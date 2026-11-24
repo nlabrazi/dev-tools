@@ -166,6 +166,11 @@ def audit_repository(
         reservations.append(
             f"{len(dashboard.pending_or_rate_limited_items)} pending/rate-limited update(s) remain on the Dependency Dashboard."
         )
+    if dashboard.lookup_warnings:
+        reservations.append(
+            f"Renovate lookup warning(s) on Dependency Dashboard #{dashboard.issue_number}: "
+            f"{', '.join(dashboard.lookup_warnings)} (check Mend Credentials / Host Rule for npm.pkg.github.com)."
+        )
 
     has_problematic_drift = False
     for row in env_matrix:

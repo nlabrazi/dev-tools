@@ -433,7 +433,14 @@ def collect_direct_staging_updates(
             pkg_json = directory / "package.json"
             if not pkg_json.is_file():
                 continue
-            res = run_command(["npm", "outdated", "--json"], cwd=str(directory), silent=True)
+            npm_cmd = ["npm", "outdated", "--json"]
+            try:
+                pkg_meta = json.loads(pkg_json.read_text(encoding="utf-8"))
+                if isinstance(pkg_meta, dict) and pkg_meta.get("workspaces"):
+                    npm_cmd = ["npm", "outdated", "--workspaces", "--json"]
+            except Exception:
+                pass
+            res = run_command(npm_cmd, cwd=str(directory), silent=True)
             raw_out = (res.stdout or "").strip()
             if not raw_out:
                 continue

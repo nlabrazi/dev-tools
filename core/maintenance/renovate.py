@@ -48,6 +48,7 @@ BREAKING_HEADING_RE = re.compile(
 NOTABLE_HEADING_RE = re.compile(r"#+\s*.*notable\s+changes", re.IGNORECASE)
 SEMVER_PARTS_RE = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?")
 DASHBOARD_MANAGER_RE = re.compile(r"<summary>([A-Za-z0-9_\-]+)\s*\(\d+\)</summary>")
+LOOKUP_WARNING_PKG_RE = re.compile(r"Failed to look up (?:npm )?package ([^:,\n`]+)", re.IGNORECASE)
 
 
 def inspect_dependency_dashboard(repo_path: str) -> DependencyDashboardInfo:
@@ -109,6 +110,7 @@ def inspect_dependency_dashboard(repo_path: str) -> DependencyDashboardInfo:
 
     no_open_or_pending = "This repository currently has no open or pending branches." in body
     detected_managers = DASHBOARD_MANAGER_RE.findall(body)
+    lookup_warnings = sorted({pkg.strip() for pkg in LOOKUP_WARNING_PKG_RE.findall(body) if pkg.strip()})
 
     open_items: list[str] = []
     pending_items: list[str] = []
@@ -121,7 +123,7 @@ def inspect_dependency_dashboard(repo_path: str) -> DependencyDashboardInfo:
             continue
         if not (line.startswith("- [ ]") or line.startswith("- [x]")):
             continue
-        if "<!-- manual job -->" in line:
+        if "<!-- manual job -->" in line or "<!-- approve-all-pending-prs -->" in line:
             continue
         cleaned_item = re.sub(r"<!--[^>]+-->", "", line[5:]).strip()
         cleaned_item = MARKDOWN_LINK_TEXT_RE.sub(r"\1", cleaned_item)
@@ -138,6 +140,8 @@ def inspect_dependency_dashboard(repo_path: str) -> DependencyDashboardInfo:
         if no_open_or_pending
         else f"Dashboard #{number} ({state}): {len(open_items)} open item(s), {len(pending_items)} pending/rate-limited."
     )
+    if lookup_warnings:
+        details += f" Lookup warning(s): {', '.join(lookup_warnings)}."
 
     return DependencyDashboardInfo(
         status=status,
@@ -147,6 +151,7 @@ def inspect_dependency_dashboard(repo_path: str) -> DependencyDashboardInfo:
         open_items=open_items,
         pending_or_rate_limited_items=pending_items,
         detected_managers=detected_managers,
+        lookup_warnings=lookup_warnings,
         details=details,
     )
 

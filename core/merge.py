@@ -67,6 +67,44 @@ def checkout_update_base_branch(repo_path: str, base_branch: str) -> None:
     )
 
 
+def sync_head_branch_after_merge(repo_path: str, repo_name: str, base_branch: str) -> bool:
+    """
+    Fast-forward the persistent integration branch (staging) to match the merged
+    base branch (master/main) and push it so both branches stay at 0 ahead / 0 behind.
+    Never force-pushes; strictly uses --ff-only.
+    """
+    if DEFAULT_HEAD_BRANCH == base_branch:
+        return True
+
+    if is_dry_run():
+        print(
+            f"🧪 Dry-run: would fast-forward '{DEFAULT_HEAD_BRANCH}' to "
+            f"'{DEFAULT_REMOTE}/{base_branch}' and push for {repo_name}."
+        )
+        return True
+
+    git_command_checked(
+        repo_path,
+        ["checkout", DEFAULT_HEAD_BRANCH],
+        context=f"checkout {DEFAULT_HEAD_BRANCH}",
+    )
+    git_command_checked(
+        repo_path,
+        ["merge", "--ff-only", f"{DEFAULT_REMOTE}/{base_branch}"],
+        context=f"fast-forward {DEFAULT_HEAD_BRANCH} to {DEFAULT_REMOTE}/{base_branch}",
+    )
+    git_command_checked(
+        repo_path,
+        ["push", DEFAULT_REMOTE, DEFAULT_HEAD_BRANCH],
+        context=f"push {DEFAULT_REMOTE}/{DEFAULT_HEAD_BRANCH}",
+    )
+    print(
+        f"✅ Synced [bold cyan]{DEFAULT_HEAD_BRANCH}[/] fast-forward with "
+        f"[bold green]{DEFAULT_REMOTE}/{base_branch}[/] for {repo_name} (0 ahead / 0 behind)."
+    )
+    return True
+
+
 def resolve_merge_base_branch(path: str) -> tuple[str | None, str]:
     if not is_dry_run():
         git_command(path, ["fetch", DEFAULT_REMOTE, "--prune"], silent=True)
@@ -364,6 +402,12 @@ def create_and_merge_pr(path: str, repo_name: str, base_branch: str | None = Non
         tag_release_interactive(path, repo_name, commit_summary)
     except Exception as e:
         print(f"⚠️  Tagging step failed/skipped for {repo_name}: {e}")
+
+    # Keep persistent integration branch (staging) aligned 0/0 with master/main
+    try:
+        sync_head_branch_after_merge(path, repo_name, base_branch)
+    except Exception as e:
+        print(f"⚠️  Auto-sync of '{DEFAULT_HEAD_BRANCH}' skipped/failed for {repo_name}: {e}")
 
 
 def main(root_dirs: list[str] = ROOT_DIRS, *, selected_repo_path: str | None = None) -> None:
