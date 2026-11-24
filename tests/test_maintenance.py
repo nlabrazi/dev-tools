@@ -1494,6 +1494,75 @@ class MaintenanceSessionResumeTests(unittest.TestCase):
                 ],
             )
 
+    def test_validator_runs_node_check_and_test_even_with_tests_dir_and_formats_biome_json(self) -> None:
+        from core.maintenance.migrator import dump_biome_friendly_json, format_files_with_biome
+        from core.maintenance.validator import _detect_validation_commands, parse_validation_output
+
+        # Biome-friendly JSON keeps short extends array on 1 line
+        rendered_json = dump_biome_friendly_json(
+            {
+                "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+                "extends": ["github>nlabrazi/dev-platform//configs/renovate/base"],
+            }
+        )
+        self.assertIn('"extends": ["github>nlabrazi/dev-platform//configs/renovate/base"]', rendered_json)
+
+        # Output parsers for Biome, Vitest, Node test runner, RSpec
+        self.assertEqual(parse_validation_output("Checked 18 files in 13ms.", 0, category="lint")[0], STATUS_PASS)
+        self.assertEqual(parse_validation_output("Found 1 error", 1, category="lint")[0], STATUS_FAIL)
+        st_v, p_v, f_v, s_v, _ = parse_validation_output("Tests  42 passed (42)", 0, category="tests")
+        self.assertEqual((st_v, p_v, f_v, s_v), (STATUS_PASS, 42, 0, 0))
+        st_n, p_n, f_n, s_n, _ = parse_validation_output("ℹ pass 7\nℹ fail 0\nℹ skipped 0", 0, category="tests")
+        self.assertEqual((st_n, p_n, f_n, s_n), (STATUS_PASS, 7, 0, 0))
+        st_r, p_r, f_r, s_r, _ = parse_validation_output("12 examples, 0 failures", 0, category="tests")
+        self.assertEqual((st_r, p_r, f_r, s_r), (STATUS_PASS, 12, 0, 0))
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "tests").mkdir()
+            (root / "tests" / "app.test.ts").write_text("// vitest\n", encoding="utf-8")
+            (root / "package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "argandici",
+                        "scripts": {
+                            "check": "biome check .",
+                            "test": "vitest run",
+                            "pack:check": "npm pack --dry-run",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cmds = _detect_validation_commands(root)
+            self.assertEqual(
+                [(cat, cmd) for _name, cat, cmd, _cwd in cmds],
+                [
+                    ("lint", ["npm", "run", "check"]),
+                    ("tests", ["npm", "test"]),
+                    ("build", ["npm", "run", "pack:check"]),
+                ],
+            )
+            # Must NEVER invoke python unittest on a Node.js repo with JS/TS tests/
+            self.assertFalse(any("unittest" in cmd for _n, _c, cmd, _d in cmds))
+
+            # Biome auto-format runs when node_modules/.bin/biome exists
+            biome_bin = root / "node_modules" / ".bin" / "biome"
+            biome_bin.parent.mkdir(parents=True)
+            biome_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+            ren_file = root / "renovate.json"
+            ren_file.write_text(rendered_json, encoding="utf-8")
+            ok_proc = subprocess.CompletedProcess(args=[str(biome_bin)], returncode=0, stdout="", stderr="")
+            with patch("core.maintenance.migrator.run_command", return_value=ok_proc) as mock_biome:
+                formatted = format_files_with_biome(root, [ren_file])
+            self.assertEqual(formatted, [str(ren_file)])
+            mock_biome.assert_called_once_with(
+                [str(biome_bin), "format", "--write", str(ren_file)],
+                cwd=str(root),
+                silent=True,
+                timeout=30,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

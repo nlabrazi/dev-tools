@@ -10,6 +10,7 @@ from core.maintenance.analyzer import parse_dashboard_pending_update
 from core.maintenance.detector import inspect_git_state
 from core.maintenance.migrator import (
     apply_migration_changes,
+    format_files_with_biome,
     prepare_migration_changes,
 )
 from core.maintenance.models import (
@@ -761,6 +762,9 @@ def apply_direct_staging_updates(
                 )
             )
             return "failed"
+
+    if original_pkg_contents:
+        format_files_with_biome(repo_root, list(original_pkg_contents.keys()))
 
     # 2. Apply Python requirements*.txt updates
     for directory in (repo_root, repo_root / "backend", repo_root / "api"):
