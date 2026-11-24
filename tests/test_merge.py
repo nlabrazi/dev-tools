@@ -15,6 +15,7 @@ from core.merge import (
     merge_pr_with_retry,
     repo_has_branch_diff,
     resolve_merge_base_branch,
+    sync_head_branch_after_merge,
     tag_release_interactive,
     wait_for_pr_merge,
 )
@@ -410,7 +411,7 @@ class MergeWorkflowTests(unittest.TestCase):
             create_and_merge_pr("/tmp/repo", "repo", base_branch="main")
         checkout_mock.assert_not_called()
 
-        # Full flow including tagging exception fallback
+        # Full flow including tagging exception fallback & post-merge staging auto-sync
         with patch("core.merge.ensure_clean_worktree"), patch(
             "core.merge.get_current_branch", return_value="staging"
         ), patch("core.merge.get_commit_summary", return_value="- feat: ship"), patch(
@@ -423,11 +424,39 @@ class MergeWorkflowTests(unittest.TestCase):
             "core.merge.checkout_update_base_branch"
         ) as checkout_mock, patch(
             "core.merge.tag_release_interactive", side_effect=RuntimeError("tag boom")
-        ) as tag_mock, patch("core.merge.console.status"), patch("core.merge.print") as print_mock:
+        ) as tag_mock, patch(
+            "core.merge.sync_head_branch_after_merge", return_value=True
+        ) as sync_mock, patch("core.merge.console.status"), patch("core.merge.print") as print_mock:
             create_and_merge_pr("/tmp/repo", "repo", base_branch="main")
         checkout_mock.assert_called_once_with("/tmp/repo", "main")
         tag_mock.assert_called_once_with("/tmp/repo", "repo", "- feat: ship")
-        self.assertIn("tag boom", print_mock.call_args.args[0])
+        sync_mock.assert_called_once_with("/tmp/repo", "repo", "main")
+        self.assertTrue(any("tag boom" in str(c.args[0]) for c in print_mock.call_args_list if c.args))
+
+    def test_sync_head_branch_after_merge_handles_ff_dry_run_and_noop(self) -> None:
+        with patch("core.merge.is_dry_run", return_value=True), patch(
+            "core.merge.git_command_checked"
+        ) as checked, patch("core.merge.print"):
+            self.assertTrue(sync_head_branch_after_merge("/tmp/repo", "repo", "master"))
+        checked.assert_not_called()
+
+        with patch("core.merge.is_dry_run", return_value=False), patch(
+            "core.merge.git_command_checked"
+        ) as checked, patch("core.merge.print"):
+            self.assertTrue(sync_head_branch_after_merge("/tmp/repo", "repo", "master"))
+        self.assertEqual(
+            [c.args[1] for c in checked.call_args_list],
+            [
+                ["checkout", "staging"],
+                ["merge", "--ff-only", "origin/master"],
+                ["push", "origin", "staging"],
+            ],
+        )
+
+        # Same branch -> immediate no-op
+        with patch("core.merge.git_command_checked") as checked:
+            self.assertTrue(sync_head_branch_after_merge("/tmp/repo", "repo", "staging"))
+        checked.assert_not_called()
 
     def test_main_handles_missing_empty_unresolved_and_up_to_date_repos(self) -> None:
         with patch("core.merge.os.path.isdir", side_effect=[False, True, True]), patch(

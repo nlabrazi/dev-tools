@@ -84,23 +84,18 @@ def _propose_renovate_config_change(repo_root: Path, report: AuditReport) -> Pro
     if (repo_root / "configs" / "renovate" / "base.json").is_file():
         return None
 
-    needs_private_npmrc = _detect_private_npm_registry(repo_root, report)
     target_path = repo_root / rc.path
     if not rc.exists:
         payload: dict[str, object] = {
             "$schema": "https://docs.renovatebot.com/renovate-schema.json",
             "extends": [DEV_PLATFORM_PRESET],
         }
-        if needs_private_npmrc:
-            payload["npmrc"] = "@nlabrazi:registry=https://npm.pkg.github.com/"
         new_text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
-        reason = "Initialize Renovate configuration inheriting central Dev Platform preset"
-        if needs_private_npmrc:
-            reason += " (with @nlabrazi GitHub Packages registry)"
+        reason = "Initialize Renovate configuration inheriting central Dev Platform preset."
         return ProposedFileChange(
             path=rc.path,
             action="create",
-            reason=reason + ".",
+            reason=reason,
             preview_diff=_unified_preview(rc.path, "", new_text),
             new_content=new_text,
         )
@@ -121,8 +116,12 @@ def _propose_renovate_config_change(repo_root: Path, report: AuditReport) -> Pro
             data["extends"] = extends
             changed = True
 
-        if needs_private_npmrc and "npmrc" not in data:
-            data["npmrc"] = "@nlabrazi:registry=https://npm.pkg.github.com/"
+        # The central Dev Platform preset already defines @nlabrazi:registry=https://npm.pkg.github.com/.
+        if (
+            isinstance(data.get("npmrc"), str)
+            and data["npmrc"].strip().rstrip("/") == "@nlabrazi:registry=https://npm.pkg.github.com"
+        ):
+            data.pop("npmrc", None)
             changed = True
 
         if changed:
@@ -131,7 +130,7 @@ def _propose_renovate_config_change(repo_root: Path, report: AuditReport) -> Pro
                 return ProposedFileChange(
                     path=rc.path,
                     action="update",
-                    reason="Inherit central Dev Platform Renovate preset while preserving local overrides.",
+                    reason="Inherit central Dev Platform Renovate preset (which already configures @nlabrazi npmrc).",
                     preview_diff=_unified_preview(rc.path, old_text, new_text),
                     new_content=new_text,
                 )

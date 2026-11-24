@@ -154,6 +154,7 @@ class DependencyDashboardInfo:
     open_items: list[str] = field(default_factory=list)
     pending_or_rate_limited_items: list[str] = field(default_factory=list)
     detected_managers: list[str] = field(default_factory=list)
+    lookup_warnings: list[str] = field(default_factory=list)
     details: str = ""
 
 
