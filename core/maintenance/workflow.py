@@ -68,10 +68,55 @@ from core.maintenance.reporter import (
     save_audit_report,
 )
 from core.maintenance.validator import run_migration_validations
-from utils.console import ask_yes_no, clear_screen, ui_panel, ui_table
+from utils.console import (
+    ask_yes_no,
+    clear_screen,
+    resolve_console_command,
+    ui_banner,
+    ui_command_bar,
+    ui_panel,
+    ui_table,
+)
 
 console = Console()
-MAINTENANCE_MENU_CHOICES = ("1", "2", "3", "4", "5", "r", "q")
+MAINTENANCE_MENU_CHOICES = ("1", "2", "3", "4", "5", "t", "r", "?", "q")
+MAINTENANCE_COMMAND_ITEMS = (
+    ("1", "Renovate"),
+    ("2", "Bump"),
+    ("t", "Check/Test"),
+    ("3", "Inspect"),
+    ("4", "Prod"),
+    ("5", "Gems"),
+    ("r", "Refresh"),
+    ("?", "Aide"),
+    ("q", "Retour"),
+)
+MAINTENANCE_COMMAND_ALIASES = {
+    "renovate": "1",
+    "align": "1",
+    "bump": "2",
+    "update": "2",
+    "deps": "2",
+    "inspect": "3",
+    "audit": "3",
+    "export": "3",
+    "prod": "4",
+    "deploy": "4",
+    "gems": "5",
+    "ruby": "5",
+    "check": "t",
+    "test": "t",
+    "tests": "t",
+    "lint": "t",
+    "refresh": "r",
+    "clear": "r",
+    "sync": "r",
+    "help": "?",
+    "aide": "?",
+    "quit": "q",
+    "exit": "q",
+    "back": "q",
+}
 
 
 def _compute_overall_status(
@@ -232,50 +277,50 @@ def audit_repository(
 
 
 def render_maintenance_menu(repo_name: str) -> None:
+    """Single-line retro command bar (use '?' or 'help' for the detailed command table)."""
+    console.print()
+    console.print(f"  {ui_command_bar(MAINTENANCE_COMMAND_ITEMS)}")
+
+
+def render_maintenance_help(repo_name: str) -> None:
     table = ui_table(
-        title=f"Dependency Maintenance · {repo_name}",
-        caption="Parcours guidé : Onboarding Renovate, Bump assisté par IA, Inspection détaillée & Vérification Prod.",
+        title=f"Aide Commandes · {repo_name}",
+        caption="Tapez le chiffre ou la commande texte directement au prompt (ex: bump, check, prod, q).",
     )
-    table.add_column("Key", justify="center", style="bold cyan", no_wrap=True)
-    table.add_column("Action", style="bold white", no_wrap=True)
+    table.add_column("Touche", justify="center", style="bold bright_yellow", no_wrap=True)
+    table.add_column("Commande", style="bold bright_green", no_wrap=True)
     table.add_column("Description", style="white")
-    table.add_row(
-        "1",
-        "🚀 Déployer / Aligner Renovate",
-        "Configurer renovate.json (preset Dev Platform), aligner CI/deploy.sh, commiter sur staging & promouvoir.",
-    )
-    table.add_row(
-        "2",
-        "⚡ Bumper les dépendances sur staging",
-        "Voir les mises à jour disponibles, appliquer directement sur staging, tester, commiter et promouvoir vers master.",
-    )
-    table.add_row(
-        "3",
-        "🔍 Inspecter en détail & Exporter",
-        "Analyser un n° de PR précis avec Ollama, afficher le plan complet, la matrice détaillée ou exporter (.md/.json).",
-    )
-    table.add_row(
-        "4",
-        "🩺 Checklist Production & Post-déploiement",
-        "Vérifier .venv symlink/backups, procédure de rollback et statut du cron via Sentinel.",
-    )
-    table.add_row(
-        "5",
-        "💎 Bumper les Gems Ruby/Rails (staging)",
-        "Détecter Gemfile, mettre à jour les gems avec Bundler sur staging, tester, commiter et promouvoir.",
-    )
-    table.add_row("r", "🔄 Rafraîchir le Dashboard", "Relancer l'analyse rapide de l'état du projet et des PRs.")
-    table.add_row("q", "Retour", "Revenir au menu principal.")
+    table.add_row("1", "renovate", "Aligner renovate.json (preset Dev Platform), CI/deploy.sh, commiter & promouvoir.")
+    table.add_row("2", "bump", "Lister les MAJ (npm, workspaces, Renovate), appliquer sur staging, formater Biome, tester & promouvoir.")
+    table.add_row("t", "check / test", "Lancer immédiatement les checks & tests locaux (Biome, Vitest/Node, Pytest, RSpec).")
+    table.add_row("3", "inspect", "Analyser une PR avec Ollama, voir le plan complet ou exporter (.md/.json).")
+    table.add_row("4", "prod", "Vérifier .venv symlink/backups, procédure rollback et statut cron Sentinel.")
+    table.add_row("5", "gems", "Mettre à jour les gems Ruby/Rails sur staging via Bundler.")
+    table.add_row("r", "refresh", "Nettoyer l'écran et relancer l'audit rapide du dépôt.")
+    table.add_row("q", "quit", "Revenir au menu principal.")
     console.print(table)
 
 
-def ask_maintenance_action() -> str:
-    return Prompt.ask(
-        "\n[bold white]Action de maintenance[/]",
-        choices=list(MAINTENANCE_MENU_CHOICES),
-        default="q",
-        show_choices=False,
-    ).lower()
+def ask_maintenance_action(repo_name: str = "maintenance") -> str:
+    """Retro interactive command prompt (e.g. `argandici> `) accepting keys or text commands."""
+    prompt_label = f"\n[bold bright_yellow]{repo_name}[/][bold bright_green]>[/]"
+    while True:
+        raw = Prompt.ask(
+            prompt_label,
+            default="q",
+            show_default=False,
+        )
+        resolved = resolve_console_command(
+            raw,
+            valid_choices=MAINTENANCE_MENU_CHOICES,
+            aliases=MAINTENANCE_COMMAND_ALIASES,
+            default="q",
+        )
+        if resolved is not None:
+            return resolved
+        console.print(
+            f"  [bright_yellow]Commande inconnue '{raw.strip()}'. Tapez [bold]?[/bold] pour l'aide ou [bold]q[/bold] pour revenir.[/]"
+        )
 
 
 def _audit_with_progress(
@@ -441,11 +486,19 @@ def run_guided_pr_bump_workflow(
         )
         if apply_status in {"applied", "dry-run"}:
             out.print()
+            proceed_commit = True
             if ask_yes_no("Exécuter les validations et tests locaux (check & test) sur staging maintenant ?", default="y"):
                 val_report = run_migration_validations(report, execute_local_tests=True)
                 render_validation_report(val_report, target_console=out)
-            run_maintenance_auto_commit(repo_path, repo_name, target_console=out)
-            run_maintenance_promote_to_base(repo_path, repo_name, target_console=out)
+                failed_checks = getattr(val_report, "counts_by_status", {}).get("FAIL", 0)
+                if failed_checks:
+                    proceed_commit = ask_yes_no(
+                        f"⚠️ {failed_checks} validation(s) locale(s) en ÉCHEC. Continuer quand même vers le commit ?",
+                        default="n",
+                    )
+            if proceed_commit:
+                run_maintenance_auto_commit(repo_path, repo_name, target_console=out)
+                run_maintenance_promote_to_base(repo_path, repo_name, target_console=out)
             return "processed"
         return apply_status
 
@@ -569,11 +622,9 @@ def run_dependency_maintenance_for_all_repos(
     total = len(repositories)
     clear_screen(out, label="Dependency Maintenance · ALL")
     out.print(
-        ui_panel(
-            f"Scan rapide de [bold cyan]{total}[/] dépôts (sans analyse Ollama).",
-            title="Dependency Maintenance · Bilan Global",
-            tone="info",
-            compact=True,
+        ui_banner(
+            "Dependency Maintenance · ALL",
+            status_items=[f"{total} dépôts (scan rapide sans Ollama)"],
         )
     )
 
@@ -592,21 +643,11 @@ def run_dependency_maintenance_for_all_repos(
             )
         except Exception as err:
             failed_repos.append((repo_name, str(err)))
-            out.rule(f"[bold red]({idx}/{total}) {repo_name}[/]")
-            out.print(
-                ui_panel(
-                    f"Impossible de scanner {repo_name} : {err}",
-                    title=f"Erreur Scan · {repo_name}",
-                    tone="danger",
-                    compact=True,
-                )
-            )
             continue
 
         reports.append(report)
-        out.rule(f"[bold cyan]({idx}/{total}) {repo_name}[/]")
-        render_project_dashboard(report, target_console=out)
 
+    clear_screen(out, label="Bilan Global · ALL")
     render_all_repos_maintenance_summary(
         reports,
         failed_repos=failed_repos,
@@ -633,9 +674,18 @@ def run_dependency_maintenance_for_repo(repo_name: str, repo_path: str) -> None:
 
     while True:
         render_maintenance_menu(repo_name)
-        choice = ask_maintenance_action()
+        choice = ask_maintenance_action(repo_name)
         if choice == "q":
             break
+
+        if choice == "?":
+            render_maintenance_help(repo_name)
+            continue
+
+        if choice == "t":
+            val_report = run_migration_validations(last_report, execute_local_tests=True)
+            render_validation_report(val_report, target_console=console)
+            continue
 
         if choice == "r":
             last_report = _audit_with_progress(repo_path, repo_name, include_ollama_analysis=True)

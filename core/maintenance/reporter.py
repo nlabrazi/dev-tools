@@ -29,7 +29,7 @@ from core.maintenance.models import (
 from core.maintenance.analyzer import parse_dashboard_pending_update
 from core.maintenance.journal import get_resume_recommendation
 from utils.common import is_dry_run
-from utils.console import ui_panel, ui_table
+from utils.console import ui_banner, ui_panel, ui_step_line, ui_table
 
 console = Console()
 
@@ -84,160 +84,136 @@ def format_pr_decision_badge(pr: RenovatePRInfo) -> str:
 
 
 def render_project_dashboard(report: AuditReport, *, target_console: Console | None = None) -> None:
+    """Compact single-screen Amstrad dashboard (replaces 3 stacked panels with <= 14 crisp lines)."""
     out = target_console or console
     gs = report.git_state
     rc = report.renovate_config
     db = report.dashboard
 
-    branch_state = "[green]propre[/]" if gs.is_clean else f"[yellow]modifié ({gs.staged_count + gs.unstaged_count} mod, {gs.untracked_count} untracked)[/]"
+    branch_state = (
+        "[bright_green]propre[/]"
+        if gs.is_clean
+        else f"[bright_yellow]modifié ({gs.staged_count + gs.unstaged_count}m/{gs.untracked_count}u)[/]"
+    )
     if not rc.exists:
-        renovate_state = "[bold red]❌ Non configuré (renovate.json absent)[/]"
+        renovate_chip = "[bold red]Renovate ❌ absent[/]"
     elif not rc.valid_json:
-        renovate_state = "[bold red]❌ JSON invalide[/]"
+        renovate_chip = "[bold red]Renovate ❌ JSON invalide[/]"
     elif rc.extends_dev_platform:
-        renovate_state = "[bold green]✅ Actif (preset Dev Platform)[/]"
+        renovate_chip = "[bright_green]Renovate ✅ Preset[/]"
     else:
-        renovate_state = "[bold yellow]🟡 Config locale (sans preset Dev Platform)[/]"
+        renovate_chip = "[bright_yellow]Renovate 🟡 local[/]"
 
-    ci_parts = [f"GitHub Actions {_status_badge(report.ci_summary.github_actions_status)}"]
+    ci_chip = f"GHA {_status_badge(report.ci_summary.github_actions_status)}"
     if report.ci_summary.jenkins_file:
-        ci_parts.append(f"Jenkins {_status_badge(report.ci_summary.jenkins_status)}")
+        ci_chip += f" · Jenkins {_status_badge(report.ci_summary.jenkins_status)}"
 
-    runtime_parts: list[str] = []
-    for row in report.env_matrix:
-        known = [
-            f"{label} {val}"
-            for label, val in (
-                ("Local", row.local),
-                ("GHA", row.github_actions),
-                ("Jenkins", row.jenkins),
-                ("Docker", row.docker),
-                ("Prod", row.production),
-            )
-            if val not in {"UNKNOWN", "N/A", ""}
-        ]
-        versions_summary = ", ".join(known) if known else "UNKNOWN"
-        if row.drift_status == DRIFT_ALIGNED:
-            icon = "[green]🟢 Aligné[/]"
-        elif row.drift_status == DRIFT_ACCEPTED:
-            icon = "[cyan]🔵 Écart DB accepté[/]"
-        elif row.drift_status == DRIFT_PROBLEMATIC:
-            icon = "[bold red]🔴 Désaligné[/]"
-        else:
-            icon = "[dim]⚪ Partiel[/]"
-        runtime_parts.append(f"• [bold]{row.component}[/] : {versions_summary} ({icon})")
-
-    state_lines = [
-        f"[bold white]Branche :[/] [cyan]{gs.branch}[/] ({branch_state}, base: {gs.base_branch or 'master'})  [dim]|[/]  [bold white]Renovate :[/] {renovate_state}",
-        f"[bold white]CI      :[/] {'  ·  '.join(ci_parts)}",
-    ]
-    if runtime_parts:
-        state_lines.append("[bold white]Runtimes:[/]\n" + "\n".join(runtime_parts))
+    mode_label = "DRY RUN" if is_dry_run() else "PROD"
+    banner_tone = "danger" if (
+        not rc.exists
+        or any(r.drift_status == DRIFT_PROBLEMATIC for r in report.env_matrix)
+        or bool(db.lookup_warnings)
+    ) else ("warning" if (report.open_prs or db.pending_or_rate_limited_items or db.detected_updates) else "info")
 
     out.print(
-        ui_panel(
-            "\n".join(state_lines),
-            title=f"📦 {report.repo_name} · État du Projet",
-            tone="success" if (rc.exists and rc.extends_dev_platform) else "warning",
+        ui_banner(
+            f"{report.repo_name} · État du Projet",
+            mode=mode_label,
+            status_items=[
+                f"[white]{gs.branch}[/] ({branch_state})",
+                renovate_chip,
+            ],
+            tone=banner_tone,
         )
     )
 
-    pr_lines: list[str] = []
+    body_lines: list[str] = []
+
+    # 1. Runtimes & CI on ONE compact line
+    if report.env_matrix:
+        rt_chips: list[str] = []
+        for row in report.env_matrix:
+            known = [
+                val
+                for val in (row.local, row.docker, row.jenkins, row.github_actions, row.production)
+                if val not in {"UNKNOWN", "N/A", ""}
+            ]
+            ver = known[0] if known else "?"
+            if row.drift_status == DRIFT_ALIGNED:
+                dot = "🟢"
+            elif row.drift_status == DRIFT_ACCEPTED:
+                dot = "🔵"
+            elif row.drift_status == DRIFT_PROBLEMATIC:
+                dot = "🔴"
+            else:
+                dot = "⚪"
+            rt_chips.append(f"[white]{row.component}[/] [bright_green]{ver}[/] {dot}")
+        body_lines.append(f"  [bold bright_yellow]Runtimes[/]   {'  ·  '.join(rt_chips)}   [dim]│[/]   [bold bright_yellow]CI[/] {ci_chip}")
+    else:
+        body_lines.append(f"  [bold bright_yellow]CI[/]         {ci_chip}")
+
+    # 2. Updates (open PRs, explicit Detected Dependencies updates, or pending items)
     if report.open_prs:
-        for pr in report.open_prs:
+        body_lines.append(f"  [bold bright_yellow]PRs ({len(report.open_prs)})[/]")
+        for pr in report.open_prs[:6]:
             badge = format_pr_decision_badge(pr)
             pkg_summary = (
                 ", ".join(f"{u.package} ({u.from_version} → {u.to_version})" for u in pr.updates)
                 if pr.updates
                 else pr.title
             )
-            verdict = ""
-            if pr.analysis:
-                verdict = pr.analysis.breaking_summary if pr.analysis.breaking_change else (pr.analysis.verdict or pr.analysis.summary)
-            pr_lines.append(
-                f"[bold cyan]#{pr.number}[/]  {badge}  [bold white]{pkg_summary}[/]  [dim]({pr.head_branch} → {pr.base_branch}, CI: {pr.ci_status})[/]"
+            body_lines.append(f"    • [bold bright_yellow]#{pr.number}[/] {badge} [white]{pkg_summary}[/]")
+    elif db.detected_updates:
+        shown = db.detected_updates[:6]
+        extra = f" [dim](+{len(db.detected_updates) - 6} autre(s))[/]" if len(db.detected_updates) > 6 else ""
+        body_lines.append(f"  [bold bright_yellow]Mises à jour[/] ({len(db.detected_updates)} détectée(s)){extra}")
+        for upd in shown:
+            tag = "[bold red]MAJOR[/]" if upd.update_type == "major" else f"[bright_green]{upd.update_type.upper()}[/]"
+            body_lines.append(
+                f"    • [white]{upd.package}[/]  [dim]{upd.from_version} →[/] [bold bright_green]{upd.to_version}[/]  ({tag})"
             )
-            if verdict:
-                pr_lines.append(f"   [dim]↳ {verdict}[/]")
-    else:
-        if db.pending_or_rate_limited_items:
-            pr_lines.append(
-                f"🟡 Aucune PR ouverte, mais [bold]{len(db.pending_or_rate_limited_items)}[/] mise(s) à jour en attente sur le Dependency Dashboard (#{db.issue_number or '?'}) :"
-            )
-            for raw_item in db.pending_or_rate_limited_items[:12]:
-                pkg, from_ver, to_ver, upd_type = parse_dashboard_pending_update(raw_item)
-                if to_ver == "UNKNOWN":
-                    pr_lines.append(f"   • [bold cyan]📦 GROUPE EN ATTENTE[/]  [white]{raw_item}[/]")
-                    continue
-                if pkg.startswith("@nlabrazi/"):
-                    item_badge = "[bold green]🟢 OUTILLAGE INTERNE (SAFE)[/]"
-                elif upd_type in {"patch", "minor", "pin", "digest"}:
-                    item_badge = f"[bold green]🟢 {upd_type.upper()} (SAFE)[/]"
-                else:
-                    item_badge = f"[bold yellow]🟠 {upd_type.upper()} (À VÉRIFIER)[/]"
-                ver_label = f"{from_ver} → {to_ver}" if from_ver != "UNKNOWN" else f"→ {to_ver}"
-                pr_lines.append(f"   • {item_badge}  [bold white]{pkg}[/]  [dim]({ver_label})[/]")
-        else:
-            dash_note = f" (Dashboard #{db.issue_number} à jour)" if db.issue_number else ""
-            pr_lines.append(f"[bold green]✅ Aucune PR Renovate ouverte{dash_note} — rien à bumper (utilisez [2] pour vérifier npm outdated sur staging).[/]")
-
-    pr_tone = "info"
-    if any(pr.ci_status == STATUS_FAIL or (pr.analysis and pr.analysis.breaking_change) for pr in report.open_prs):
-        pr_tone = "danger"
-    elif not report.open_prs:
-        pr_tone = "success"
-
-    out.print(
-        ui_panel(
-            "\n".join(pr_lines),
-            title="🎯 PRs Renovate & Décisions de Bump",
-            tone=pr_tone,
-            compact=True,
+    elif db.pending_or_rate_limited_items:
+        body_lines.append(
+            f"  [bold bright_yellow]En attente[/]   {len(db.pending_or_rate_limited_items)} item(s) sur Dashboard #{db.issue_number or '?'}"
         )
-    )
+        for raw_item in db.pending_or_rate_limited_items[:5]:
+            pkg, from_ver, to_ver, upd_type = parse_dashboard_pending_update(raw_item)
+            if to_ver == "UNKNOWN":
+                body_lines.append(f"    • [white]{raw_item[:95]}[/]")
+            else:
+                ver_label = f"{from_ver} → {to_ver}" if from_ver != "UNKNOWN" else f"→ {to_ver}"
+                body_lines.append(f"    • [white]{pkg}[/] [dim]({ver_label}, {upd_type})[/]")
 
-    action_items: list[str] = []
+    # 3. Mend lookup warnings (if any)
+    if db.lookup_warnings:
+        body_lines.append(
+            f"  [bold red]Mend ⚠️[/]      Lookup échoué : [white]{', '.join(db.lookup_warnings[:4])}[/]"
+        )
+
+    # 4. Crisp action hint(s) — zero duplication
+    hints: list[str] = []
     if not rc.exists or not rc.extends_dev_platform:
-        action_items.append("🚀 [bold]Renovate à déployer/aligner[/] : utilisez l'action [bold cyan][1][/] pour configurer le preset Dev Platform.")
+        hints.append("[bold bright_yellow][1][/] Aligner Renovate")
     for row in report.env_matrix:
         if row.drift_status == DRIFT_PROBLEMATIC:
-            action_items.append(f"🔴 [bold]Désalignement {row.component}[/] : {row.drift_details} (corrigeable via l'action [bold cyan][1][/]).")
+            hints.append(f"[bold red]Drift {row.component}[/] ({row.drift_details}) → [bold bright_yellow][1][/]")
     if gs.venv_exists and gs.venv_has_pip is False and any("pip install" in r for r in report.reservations):
-        action_items.append("🔴 [bold]Script deploy.sh incompatible[/] : remplacer 'pip install' par 'uv pip install' (action [bold cyan][1][/]).")
+        hints.append("Migrer deploy.sh vers uv pip → [bold bright_yellow][1][/]")
     if gs.untracked_venv_entries:
-        action_items.append(f"🟡 [bold]Virtualenv non ignoré[/] : exclure {', '.join(gs.untracked_venv_entries)} dans .git/info/exclude (action [bold cyan][1][/]).")
-    if report.open_prs:
-        action_items.append(f"⚡ [bold]{len(report.open_prs)} PR(s) Renovate à traiter[/] : utilisez l'action [bold cyan][2][/] pour analyser et merger.")
-    elif db.pending_or_rate_limited_items:
-        action_items.append(
-            f"⚡ [bold]{len(db.pending_or_rate_limited_items)} mise(s) à jour disponible(s)[/] : utilisez l'action [bold cyan][2][/] pour bumper directement sur staging."
-        )
-    for st in report.stacks:
-        if st.ecosystem == "python" and st.unpinned_dependencies:
-            sample = ", ".join(st.unpinned_dependencies[:5])
-            more = f" (+{len(st.unpinned_dependencies) - 5})" if len(st.unpinned_dependencies) > 5 else ""
-            action_items.append(
-                f"ℹ️  [bold]{len(st.unpinned_dependencies)} dépendance(s) Python non épinglée(s)[/] ({sample}{more}) dans {', '.join(st.files)}."
-            )
+        hints.append(f"Exclure {', '.join(gs.untracked_venv_entries)} → [bold bright_yellow][1][/]")
+    if report.open_prs or db.pending_or_rate_limited_items or db.detected_updates:
+        hints.append("[bold bright_yellow][2][/] Bumper sur staging")
 
-    if action_items:
-        out.print(
-            ui_panel(
-                "\n".join(f"• {item}" for item in action_items),
-                title="💡 Que faut-il faire sur ce projet ?",
-                tone="warning",
-                compact=True,
-            )
-        )
+    if hints:
+        body_lines.append(f"  [bold bright_yellow]À faire[/]    {'  │  '.join(hints)}")
     else:
-        out.print(
-            ui_panel(
-                "[bold green]✅ Tout est propre et aligné sur ce dépôt. Aucune action requise.[/]",
-                title="💡 Que faut-il faire sur ce projet ?",
-                tone="success",
-                compact=True,
-            )
+        dash_note = f" (Dashboard #{db.issue_number})" if db.issue_number else ""
+        body_lines.append(
+            f"  [bold bright_green]Statut[/]     ✅ Tout est propre et aligné{dash_note}. "
+            "[dim]([2] vérifie aussi npm outdated local)[/]"
         )
+
+    out.print("\n".join(body_lines))
 
 
 _OVERALL_STATUS_PRIORITY = {
@@ -742,22 +718,26 @@ def render_validation_report(
     target_console: Console | None = None,
 ) -> None:
     out = target_console or console
-    table = ui_table(
-        title=f"Validation Report · {report.repo_name}",
-        caption="PASS, FAIL, SKIPPED, PENDING and UNKNOWN are reported separately. Skipped tests never count as a full pass.",
-        show_lines=True,
+    lines = [
+        ui_step_line(
+            chk.name,
+            status=chk.status,
+            detail=f"{chk.details}" + (f" · {chk.command}" if chk.command else ""),
+        )
+        for chk in report.checks
+    ]
+    tone = "danger" if report.counts_by_status.get(STATUS_FAIL) else (
+        "success" if report.overall_status == STATUS_PASS else "warning"
     )
-    table.add_column("Check", style="bold white")
-    table.add_column("Category", justify="center", style="cyan", no_wrap=True)
-    table.add_column("Status", justify="center", no_wrap=True)
-    table.add_column("Details", style="white")
-
-    for chk in report.checks:
-        detail_text = chk.details
-        if chk.command:
-            detail_text += f"\n[dim]Command: {chk.command}[/]"
-        table.add_row(chk.name, chk.category, _status_badge(chk.status), detail_text)
-    out.print(table)
+    lines.append(f"\n  [bold white]Bilan :[/] {_status_badge(report.overall_status)}")
+    out.print(
+        ui_panel(
+            "\n".join(lines),
+            title=f"Validation Report · {report.repo_name}",
+            tone=tone,
+            compact=True,
+        )
+    )
 
     c = report.counts_by_status
     summary_lines = [

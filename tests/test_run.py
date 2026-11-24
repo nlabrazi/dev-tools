@@ -84,6 +84,9 @@ class RunConfigTests(unittest.TestCase):
         self.assertEqual(choice, "3")
         prompt.assert_called_once()
 
+        with patch("run.Prompt.ask", return_value="deps"):
+            self.assertEqual(run.ask_main_action(), "7")
+
     def test_ask_review_repository_returns_selected_repo(self) -> None:
         repositories = [("api", "/tmp/api"), ("web", "/tmp/web")]
 

@@ -12,13 +12,51 @@ from core.maintenance.models import (
     MigrationApplicationResult,
     ProposedFileChange,
 )
-from utils.common import is_dry_run
+from utils.common import is_dry_run, run_command
 
 JENKINS_PYTHON_TAG_RE = re.compile(r"(python:)([0-9]+(?:\.[0-9]+){0,2})(-[A-Za-z0-9.\-_]+)?")
 JENKINS_NODE_TAG_RE = re.compile(r"(node:)([0-9]+(?:\.[0-9]+){0,2})(-[A-Za-z0-9.\-_]+)?")
 JENKINS_PLAYWRIGHT_TAG_RE = re.compile(
     r"(mcr\.microsoft\.com/playwright:v?)([0-9]+(?:\.[0-9]+){0,2})(-[A-Za-z0-9.\-_]+)?"
 )
+
+
+def dump_biome_friendly_json(data: dict[str, object]) -> str:
+    """Serialize JSON matching Biome's lineWidth=100 formatting (single-line short arrays)."""
+    raw = json.dumps(data, indent=2, ensure_ascii=False)
+    # Collapse short string arrays like `"extends": [\n    "..."\n  ]` onto one line (Biome default)
+    collapsed = re.sub(
+        r'\[\n(\s+)"([^"\n]+)"\n\s+\]',
+        lambda m: f'["{m.group(2)}"]' if len(m.group(2)) <= 80 else m.group(0),
+        raw,
+    )
+    return collapsed + "\n"
+
+
+def format_files_with_biome(repo_root: Path, file_paths: list[Path]) -> list[str]:
+    """Run local Biome formatter strictly on modified JSON/JS/TS files when Biome is installed."""
+    targets = [p for p in file_paths if p.is_file() and p.suffix.lower() in {".json", ".jsonc", ".js", ".ts", ".mjs"}]
+    if not targets:
+        return []
+
+    formatted: list[str] = []
+    for base_dir in (repo_root, repo_root / "ui", repo_root / "frontend"):
+        biome_bin = base_dir / "node_modules" / ".bin" / "biome"
+        if not biome_bin.is_file():
+            continue
+        scoped = []
+        for path in targets:
+            try:
+                path.resolve().relative_to(base_dir.resolve())
+                scoped.append(str(path))
+            except ValueError:
+                continue
+        if not scoped:
+            continue
+        res = run_command([str(biome_bin), "format", "--write", *scoped], cwd=str(base_dir), silent=True, timeout=30)
+        if res.returncode == 0:
+            formatted.extend(scoped)
+    return formatted
 
 
 def _unified_preview(path: str, old_text: str, new_text: str) -> str:
@@ -90,7 +128,7 @@ def _propose_renovate_config_change(repo_root: Path, report: AuditReport) -> Pro
             "$schema": "https://docs.renovatebot.com/renovate-schema.json",
             "extends": [DEV_PLATFORM_PRESET],
         }
-        new_text = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        new_text = dump_biome_friendly_json(payload)
         reason = "Initialize Renovate configuration inheriting central Dev Platform preset."
         return ProposedFileChange(
             path=rc.path,
@@ -125,7 +163,7 @@ def _propose_renovate_config_change(repo_root: Path, report: AuditReport) -> Pro
             changed = True
 
         if changed:
-            new_text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+            new_text = dump_biome_friendly_json(data)
             if new_text != old_text:
                 return ProposedFileChange(
                     path=rc.path,
@@ -328,6 +366,7 @@ def apply_migration_changes(
     skipped: list[str] = []
     messages: list[str] = []
 
+    written_targets: list[Path] = []
     for change in changes:
         target = (repo_root / change.path).resolve()
         try:
@@ -341,10 +380,16 @@ def apply_migration_changes(
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(change.new_content, encoding="utf-8")
             applied.append(change.path)
+            written_targets.append(target)
             messages.append(f"Applied ({change.action}): {change.path}")
         except OSError as error:
             skipped.append(change.path)
             messages.append(f"Failed to write {change.path}: {error}")
+
+    if written_targets:
+        formatted = format_files_with_biome(repo_root, written_targets)
+        if formatted:
+            messages.append(f"Formatted with Biome: {len(formatted)} file(s).")
 
     status = "applied" if applied else "aborted"
     return MigrationApplicationResult(

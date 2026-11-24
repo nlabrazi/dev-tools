@@ -10,7 +10,13 @@ from rich import print
 from rich.console import Console
 from rich.prompt import Prompt
 
-from utils.console import clear_screen, ui_panel, ui_table
+from utils.console import (
+    clear_screen,
+    resolve_console_command,
+    ui_banner,
+    ui_panel,
+    ui_table,
+)
 
 console = Console()
 REVIEW_TARGET_CHOICES = ("1", "2", "3", "4", "5", "q")
@@ -201,6 +207,22 @@ WORKFLOW_ITEMS: tuple[WorkflowMenuItem, ...] = (
 )
 
 MENU_CHOICES: tuple[str, ...] = tuple(item.key for item in WORKFLOW_ITEMS)
+MENU_ALIASES: dict[str, str] = {
+    "commit": "1",
+    "merge": "2",
+    "pr": "2",
+    "review": "3",
+    "comment": "4",
+    "changelog": "5",
+    "sync": "6",
+    "maintenance": "7",
+    "deps": "7",
+    "bump": "7",
+    "coverage": "8",
+    "cov": "8",
+    "quit": "q",
+    "exit": "q",
+}
 WORKFLOW_DISPATCH: dict[str, Callable[..., Any]] = {
     item.key: item.handler for item in WORKFLOW_ITEMS if item.handler is not None
 }
@@ -217,23 +239,22 @@ def render_main_menu(
     root_label = "root" if root_count == 1 else "roots"
 
     console.print(
-        ui_panel(
-            (
-                f"[bold white]{mode_label}[/]  [dim]·[/]  "
-                f"[cyan]{root_count} {root_label}[/]  [dim]·[/]  "
-                f"head [cyan]{head_branch}[/]\n"
-                f"[dim]Base branch: {base_branch_strategy}[/]"
-            ),
-            title="Dev Tools Control Deck",
+        ui_banner(
+            "Dev Tools Control Deck",
+            mode=mode_label,
+            status_items=[
+                f"[bright_green]{root_count} {root_label}[/]",
+                f"head [white]{head_branch}[/]",
+                f"[dim]{base_branch_strategy}[/]",
+            ],
         )
     )
 
     table = ui_table(
-        title="Choose a workflow",
-        caption="Enter a key, or q to quit.",
+        caption="Tapez un chiffre (1-8) ou une commande (commit, merge, deps, coverage, sync, q).",
     )
-    table.add_column("Key", justify="center", style="bold cyan", no_wrap=True)
-    table.add_column("Workflow", style="bold white", no_wrap=True)
+    table.add_column("Key", justify="center", style="bold bright_yellow", no_wrap=True)
+    table.add_column("Workflow", style="bold bright_green", no_wrap=True)
     table.add_column("What it does", style="white")
 
     for item in WORKFLOW_ITEMS:
@@ -243,12 +264,23 @@ def render_main_menu(
 
 
 def ask_main_action() -> str:
-    return Prompt.ask(
-        "\n[bold white]What do you want to do?[/]",
-        choices=list(MENU_CHOICES),
-        default="q",
-        show_choices=False,
-    ).lower()
+    while True:
+        raw = Prompt.ask(
+            "\n[bold bright_yellow]dev-tools[/][bold bright_green]>[/]",
+            default="q",
+            show_default=False,
+        )
+        resolved = resolve_console_command(
+            raw,
+            valid_choices=MENU_CHOICES,
+            aliases=MENU_ALIASES,
+            default="q",
+        )
+        if resolved is not None:
+            return resolved
+        console.print(
+            f"  [bright_yellow]Commande inconnue '{raw.strip()}'. Utilisez 1-8, commit, merge, deps, sync, coverage ou q.[/]"
+        )
 
 
 def render_repository_picker(

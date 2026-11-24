@@ -5,7 +5,17 @@ from unittest.mock import patch
 
 from rich.console import Console
 
-from utils.console import clear_screen, is_clear_screen_disabled, ui_panel, ui_table
+from utils.console import (
+    ask_console_command,
+    clear_screen,
+    is_clear_screen_disabled,
+    resolve_console_command,
+    ui_banner,
+    ui_command_bar,
+    ui_panel,
+    ui_step_line,
+    ui_table,
+)
 
 
 class ConsoleUiTests(unittest.TestCase):
@@ -79,6 +89,38 @@ class ConsoleUiTests(unittest.TestCase):
         self.assertTrue(cleared)
         self.assertEqual(sleep_mock.call_count, 6)
         clear_mock.assert_called_once()
+
+    def test_retro_amstrad_banner_command_bar_step_line_and_prompt(self) -> None:
+        buffer = io.StringIO()
+        console = Console(file=buffer, force_terminal=False, color_system=None, width=100)
+
+        console.print(ui_banner("argandici", mode="PROD", status_items=["staging (propre)", "Renovate OK"]))
+        console.print(ui_command_bar([("1", "Renovate"), ("2", "Bump"), ("q", "Retour")]))
+        console.print(ui_step_line("Biome Check", status="OK", detail="18 files"))
+        console.print(ui_step_line("Vitest", status="FAIL", detail="1 failed"))
+
+        output = buffer.getvalue()
+        self.assertIn("DEV-TOOLS", output)
+        self.assertIn("argandici", output)
+        self.assertIn("[1] Renovate", output)
+        self.assertIn("[2] Bump", output)
+        self.assertIn("Biome Check", output)
+        self.assertIn("FAIL", output)
+
+        aliases = {"bump": "2", "quit": "q"}
+        self.assertEqual(resolve_console_command("BUMP", valid_choices={"1", "2", "q"}, aliases=aliases), "2")
+        self.assertEqual(resolve_console_command("", valid_choices={"1", "2", "q"}, default="q"), "q")
+        self.assertIsNone(resolve_console_command("unknown", valid_choices={"1", "2", "q"}, aliases=aliases))
+
+        with patch("builtins.input", side_effect=["nope", "bump"]):
+            choice = ask_console_command(
+                "argandici",
+                valid_choices={"1", "2", "q"},
+                aliases=aliases,
+                target_console=console,
+            )
+        self.assertEqual(choice, "2")
+        self.assertIn("Commande inconnue", buffer.getvalue())
 
 
 if __name__ == "__main__":

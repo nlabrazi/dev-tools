@@ -665,7 +665,8 @@ class MigrationPlanGenerationTests(unittest.TestCase):
             render_migration_plan(plan, target_console=test_console)
             output = buffer.getvalue()
             self.assertIn("État du Projet", output)
-            self.assertIn("PRs Renovate & Décisions de Bump", output)
+            self.assertIn("Runtimes", output)
+            self.assertIn("À faire", output)
             self.assertIn("Risk Classification & Target Versions", output)
             self.assertIn("Migration & Rollback Plan", output)
             for idx, step in enumerate(plan.ordered_steps, start=1):
@@ -1407,6 +1408,161 @@ class MaintenanceSessionResumeTests(unittest.TestCase):
                 updates = collect_direct_staging_updates(tmp_dir, report)
             mock_run.assert_called_once_with(["npm", "outdated", "--workspaces", "--json"], cwd=tmp_dir, silent=True)
             self.assertEqual([(u.package, u.to_version, u.update_type) for u in updates], [("@playwright/test", "1.65.1", "minor")])
+
+    def test_workspace_lockfile_drift_and_detected_dependencies_are_collected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "package.json").write_text(
+                json.dumps({"name": "dev-platform", "private": True, "workspaces": ["packages/*"]}),
+                encoding="utf-8",
+            )
+            pw_dir = root / "packages" / "config-playwright"
+            vitest_dir = root / "packages" / "config-vitest"
+            pw_dir.mkdir(parents=True)
+            vitest_dir.mkdir(parents=True)
+            (pw_dir / "package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "@nlabrazi/config-playwright",
+                        "version": "0.1.0",
+                        "dependencies": {"@playwright/test": "^1.63.0"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (vitest_dir / "package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "@nlabrazi/config-vitest",
+                        "version": "0.2.4",
+                        "dependencies": {"@vitejs/plugin-vue": "^6.0.5"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            # Lockfile already resolved @playwright/test 1.65.1 -> npm outdated returns {}
+            (root / "package-lock.json").write_text(
+                json.dumps({"packages": {"node_modules/@playwright/test": {"version": "1.65.1"}}}),
+                encoding="utf-8",
+            )
+            dashboard_issue = [
+                {
+                    "number": 7,
+                    "title": "Dependency Dashboard",
+                    "state": "OPEN",
+                    "body": (
+                        "## Pending Approval\n"
+                        " - [ ] <!-- approve-branch=renovate/all-minor-patch -->fix(deps): update all non-major dependencies (`@playwright/test`, `@vitejs/plugin-vue`, `node`)\n"
+                        "## Detected Dependencies\n"
+                        " - `node >=26 <27`\n"
+                        " - `@playwright/test ^1.63.0` → [Updates: `^1.65.1`]\n"
+                        " - `@vitejs/plugin-vue ^6.0.5` → [Updates: `^6.0.11`]\n"
+                    ),
+                }
+            ]
+            issue_gh = subprocess.CompletedProcess(
+                args=["gh"], returncode=0, stdout=json.dumps(dashboard_issue), stderr=""
+            )
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch("core.maintenance.detector.git_output", return_value="staging"), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", side_effect=[issue_gh, empty_gh]):
+                report = audit_repository(tmp_dir, "dev-platform", include_ollama_analysis=False)
+
+            self.assertEqual(
+                [(u.package, u.from_version, u.to_version, u.update_type) for u in report.dashboard.detected_updates],
+                [
+                    ("@playwright/test", "1.63.0", "1.65.1", "minor"),
+                    ("@vitejs/plugin-vue", "6.0.5", "6.0.11", "patch"),
+                ],
+            )
+
+            empty_outdated = subprocess.CompletedProcess(
+                args=["npm", "outdated", "--workspaces", "--json"],
+                returncode=0,
+                stdout="{}",
+                stderr="",
+            )
+            with patch("core.maintenance.git_ops.run_command", return_value=empty_outdated):
+                updates = collect_direct_staging_updates(tmp_dir, report)
+
+            self.assertEqual(
+                [(u.package, u.from_version, u.to_version, u.update_type) for u in updates],
+                [
+                    ("@playwright/test", "1.63.0", "1.65.1", "minor"),
+                    ("@vitejs/plugin-vue", "6.0.5", "6.0.11", "patch"),
+                ],
+            )
+
+    def test_validator_runs_node_check_and_test_even_with_tests_dir_and_formats_biome_json(self) -> None:
+        from core.maintenance.migrator import dump_biome_friendly_json, format_files_with_biome
+        from core.maintenance.validator import _detect_validation_commands, parse_validation_output
+
+        # Biome-friendly JSON keeps short extends array on 1 line
+        rendered_json = dump_biome_friendly_json(
+            {
+                "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+                "extends": ["github>nlabrazi/dev-platform//configs/renovate/base"],
+            }
+        )
+        self.assertIn('"extends": ["github>nlabrazi/dev-platform//configs/renovate/base"]', rendered_json)
+
+        # Output parsers for Biome, Vitest, Node test runner, RSpec
+        self.assertEqual(parse_validation_output("Checked 18 files in 13ms.", 0, category="lint")[0], STATUS_PASS)
+        self.assertEqual(parse_validation_output("Found 1 error", 1, category="lint")[0], STATUS_FAIL)
+        st_v, p_v, f_v, s_v, _ = parse_validation_output("Tests  42 passed (42)", 0, category="tests")
+        self.assertEqual((st_v, p_v, f_v, s_v), (STATUS_PASS, 42, 0, 0))
+        st_n, p_n, f_n, s_n, _ = parse_validation_output("ℹ pass 7\nℹ fail 0\nℹ skipped 0", 0, category="tests")
+        self.assertEqual((st_n, p_n, f_n, s_n), (STATUS_PASS, 7, 0, 0))
+        st_r, p_r, f_r, s_r, _ = parse_validation_output("12 examples, 0 failures", 0, category="tests")
+        self.assertEqual((st_r, p_r, f_r, s_r), (STATUS_PASS, 12, 0, 0))
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "tests").mkdir()
+            (root / "tests" / "app.test.ts").write_text("// vitest\n", encoding="utf-8")
+            (root / "package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "argandici",
+                        "scripts": {
+                            "check": "biome check .",
+                            "test": "vitest run",
+                            "pack:check": "npm pack --dry-run",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cmds = _detect_validation_commands(root)
+            self.assertEqual(
+                [(cat, cmd) for _name, cat, cmd, _cwd in cmds],
+                [
+                    ("lint", ["npm", "run", "check"]),
+                    ("tests", ["npm", "test"]),
+                    ("build", ["npm", "run", "pack:check"]),
+                ],
+            )
+            # Must NEVER invoke python unittest on a Node.js repo with JS/TS tests/
+            self.assertFalse(any("unittest" in cmd for _n, _c, cmd, _d in cmds))
+
+            # Biome auto-format runs when node_modules/.bin/biome exists
+            biome_bin = root / "node_modules" / ".bin" / "biome"
+            biome_bin.parent.mkdir(parents=True)
+            biome_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+            ren_file = root / "renovate.json"
+            ren_file.write_text(rendered_json, encoding="utf-8")
+            ok_proc = subprocess.CompletedProcess(args=[str(biome_bin)], returncode=0, stdout="", stderr="")
+            with patch("core.maintenance.migrator.run_command", return_value=ok_proc) as mock_biome:
+                formatted = format_files_with_biome(root, [ren_file])
+            self.assertEqual(formatted, [str(ren_file)])
+            mock_biome.assert_called_once_with(
+                [str(biome_bin), "format", "--write", str(ren_file)],
+                cwd=str(root),
+                silent=True,
+                timeout=30,
+            )
 
 
 if __name__ == "__main__":

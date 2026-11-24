@@ -10,6 +10,7 @@ from core.maintenance.analyzer import parse_dashboard_pending_update
 from core.maintenance.detector import inspect_git_state
 from core.maintenance.migrator import (
     apply_migration_changes,
+    format_files_with_biome,
     prepare_migration_changes,
 )
 from core.maintenance.models import (
@@ -419,6 +420,96 @@ def _iter_node_package_json_files(repo_root: Path) -> tuple[list[Path], bool]:
     return files, has_root_workspaces
 
 
+def _semver_tuple(raw: str) -> tuple[int, int, int] | None:
+    cleaned = re.sub(r"^[~^>=<]+", "", (raw or "").strip()).lstrip("v")
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)", cleaned)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+
+def _collect_declared_npm_packages(repo_root: Path) -> set[str]:
+    declared: set[str] = set()
+    pkg_files, _ = _iter_node_package_json_files(repo_root)
+    for pkg_file in pkg_files:
+        try:
+            data = json.loads(pkg_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        for section in ("dependencies", "devDependencies", "peerDependencies"):
+            deps = data.get(section)
+            if isinstance(deps, dict):
+                declared.update(str(k) for k in deps.keys())
+    return declared
+
+
+def _collect_workspace_lockfile_drift(repo_root: Path) -> list[RenovateUpdateItem]:
+    """Detect workspace package.json ranges lagging behind versions already resolved in package-lock.json."""
+    lock_path = repo_root / "package-lock.json"
+    if not lock_path.is_file():
+        return []
+    pkg_files, has_workspaces = _iter_node_package_json_files(repo_root)
+    if not has_workspaces:
+        return []
+
+    try:
+        lock_data = json.loads(lock_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    lock_packages = lock_data.get("packages") if isinstance(lock_data, dict) else None
+    if not isinstance(lock_packages, dict):
+        return []
+
+    locked_versions: dict[str, str] = {}
+    for key, info in lock_packages.items():
+        if not isinstance(info, dict) or not isinstance(key, str):
+            continue
+        ver = info.get("version")
+        if not isinstance(ver, str) or "-" in ver:
+            continue
+        if key.startswith("node_modules/"):
+            dep_name = key[len("node_modules/") :]
+            if "node_modules/" not in dep_name:
+                locked_versions[dep_name] = ver
+
+    drifted: dict[str, RenovateUpdateItem] = {}
+    for pkg_file in pkg_files:
+        if pkg_file == repo_root / "package.json":
+            continue
+        try:
+            pkg_data = json.loads(pkg_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(pkg_data, dict):
+            continue
+        for section in ("dependencies", "devDependencies"):
+            deps = pkg_data.get(section)
+            if not isinstance(deps, dict):
+                continue
+            for dep_name, raw_spec in deps.items():
+                if not isinstance(raw_spec, str) or dep_name in drifted:
+                    continue
+                locked_ver = locked_versions.get(dep_name)
+                if not locked_ver:
+                    continue
+                declared_parts = _semver_tuple(raw_spec)
+                locked_parts = _semver_tuple(locked_ver)
+                if not declared_parts or not locked_parts or locked_parts <= declared_parts:
+                    continue
+                declared_str = f"{declared_parts[0]}.{declared_parts[1]}.{declared_parts[2]}"
+                upd_type = infer_semver_update_type(declared_str, locked_ver)
+                drifted[dep_name] = RenovateUpdateItem(
+                    package=dep_name,
+                    update_type=upd_type,
+                    from_version=declared_str,
+                    to_version=locked_ver,
+                    raw_change=f"{declared_str} -> {locked_ver}",
+                )
+    return list(drifted.values())
+
+
 def collect_direct_staging_updates(
     repo_path: str,
     report: AuditReport,
@@ -488,6 +579,22 @@ def collect_direct_staging_updates(
                     to_version=to_ver,
                     raw_change=f"{from_ver} -> {to_ver}" if from_ver else f"-> {to_ver}",
                 )
+
+    repo_root = Path(repo_path)
+
+    # Catch npm workspace ranges (e.g. dev-platform packages/*/package.json) lagging behind package-lock.json
+    for drift_item in _collect_workspace_lockfile_drift(repo_root):
+        if drift_item.package not in updates_by_pkg:
+            updates_by_pkg[drift_item.package] = drift_item
+
+    # Include explicit 'pkg ^old -> [Updates: ^new]' entries from Renovate's Detected Dependencies section
+    declared_npm_pkgs = _collect_declared_npm_packages(repo_root)
+    for det_item in getattr(report.dashboard, "detected_updates", []) or []:
+        if det_item.package in updates_by_pkg:
+            continue
+        if declared_npm_pkgs and det_item.package not in declared_npm_pkgs:
+            continue
+        updates_by_pkg[det_item.package] = det_item
 
     for raw_item in report.dashboard.pending_or_rate_limited_items:
         pkg, from_ver, to_ver, upd_type = parse_dashboard_pending_update(raw_item)
@@ -655,6 +762,9 @@ def apply_direct_staging_updates(
                 )
             )
             return "failed"
+
+    if original_pkg_contents:
+        format_files_with_biome(repo_root, list(original_pkg_contents.keys()))
 
     # 2. Apply Python requirements*.txt updates
     for directory in (repo_root, repo_root / "backend", repo_root / "api"):

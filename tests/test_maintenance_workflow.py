@@ -250,6 +250,10 @@ class MaintenanceWorkflowHelpersTests(unittest.TestCase):
 
         with patch("core.maintenance.workflow.Prompt.ask", return_value="R"):
             self.assertEqual(ask_maintenance_action(), "r")
+        with patch("core.maintenance.workflow.Prompt.ask", return_value="bump"):
+            self.assertEqual(ask_maintenance_action("argandici"), "2")
+        with patch("core.maintenance.workflow.Prompt.ask", return_value="check"):
+            self.assertEqual(ask_maintenance_action("argandici"), "t")
 
 
 class MaintenanceBumpWorkflowsTests(unittest.TestCase):
@@ -510,7 +514,8 @@ class MaintenanceRepoMenuLoopTests(unittest.TestCase):
 
         self.assertEqual([r.repo_name for r in reports], ["alpha", "beta"])
         self.assertEqual(seen_ollama_flags, [False, False, False])
-        self.assertEqual(render_dash.call_count, 2)
+        # Anti-spam: ALL mode renders only the compact summary table, never N full per-repo dashboards
+        render_dash.assert_not_called()
         output = buffer.getvalue()
         self.assertIn("Bilan Global · Dependency Maintenance (3 dépôts)", output)
         self.assertIn("Synthèse Globale Dépendances", output)
