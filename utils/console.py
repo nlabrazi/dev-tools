@@ -72,7 +72,7 @@ def ui_banner(
 
 def ui_command_bar(commands: Iterable[tuple[str, str]]) -> str:
     """Single-line retro command bar: [1] Renovate  [2] Bump  ...  [q] Retour."""
-    segments = [f"[bold bright_yellow][{key}][/] [bright_green]{label}[/]" for key, label in commands]
+    segments = [f"[bold bright_yellow]\\[{key}][/] [bright_green]{label}[/]" for key, label in commands]
     return "  ".join(segments)
 
 

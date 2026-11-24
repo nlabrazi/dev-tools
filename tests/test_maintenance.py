@@ -665,7 +665,8 @@ class MigrationPlanGenerationTests(unittest.TestCase):
             render_migration_plan(plan, target_console=test_console)
             output = buffer.getvalue()
             self.assertIn("État du Projet", output)
-            self.assertIn("PRs Renovate & Décisions de Bump", output)
+            self.assertIn("Runtimes", output)
+            self.assertIn("À faire", output)
             self.assertIn("Risk Classification & Target Versions", output)
             self.assertIn("Migration & Rollback Plan", output)
             for idx, step in enumerate(plan.ordered_steps, start=1):
