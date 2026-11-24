@@ -1408,6 +1408,92 @@ class MaintenanceSessionResumeTests(unittest.TestCase):
             mock_run.assert_called_once_with(["npm", "outdated", "--workspaces", "--json"], cwd=tmp_dir, silent=True)
             self.assertEqual([(u.package, u.to_version, u.update_type) for u in updates], [("@playwright/test", "1.65.1", "minor")])
 
+    def test_workspace_lockfile_drift_and_detected_dependencies_are_collected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "package.json").write_text(
+                json.dumps({"name": "dev-platform", "private": True, "workspaces": ["packages/*"]}),
+                encoding="utf-8",
+            )
+            pw_dir = root / "packages" / "config-playwright"
+            vitest_dir = root / "packages" / "config-vitest"
+            pw_dir.mkdir(parents=True)
+            vitest_dir.mkdir(parents=True)
+            (pw_dir / "package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "@nlabrazi/config-playwright",
+                        "version": "0.1.0",
+                        "dependencies": {"@playwright/test": "^1.63.0"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (vitest_dir / "package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "@nlabrazi/config-vitest",
+                        "version": "0.2.4",
+                        "dependencies": {"@vitejs/plugin-vue": "^6.0.5"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            # Lockfile already resolved @playwright/test 1.65.1 -> npm outdated returns {}
+            (root / "package-lock.json").write_text(
+                json.dumps({"packages": {"node_modules/@playwright/test": {"version": "1.65.1"}}}),
+                encoding="utf-8",
+            )
+            dashboard_issue = [
+                {
+                    "number": 7,
+                    "title": "Dependency Dashboard",
+                    "state": "OPEN",
+                    "body": (
+                        "## Pending Approval\n"
+                        " - [ ] <!-- approve-branch=renovate/all-minor-patch -->fix(deps): update all non-major dependencies (`@playwright/test`, `@vitejs/plugin-vue`, `node`)\n"
+                        "## Detected Dependencies\n"
+                        " - `node >=26 <27`\n"
+                        " - `@playwright/test ^1.63.0` → [Updates: `^1.65.1`]\n"
+                        " - `@vitejs/plugin-vue ^6.0.5` → [Updates: `^6.0.11`]\n"
+                    ),
+                }
+            ]
+            issue_gh = subprocess.CompletedProcess(
+                args=["gh"], returncode=0, stdout=json.dumps(dashboard_issue), stderr=""
+            )
+            empty_gh = subprocess.CompletedProcess(args=["gh"], returncode=0, stdout="[]", stderr="")
+            with patch("core.maintenance.detector.git_output", return_value="staging"), patch(
+                "core.maintenance.detector.resolve_repo_base_branch",
+                return_value=("master", "resolved"),
+            ), patch("core.maintenance.renovate.run_command", side_effect=[issue_gh, empty_gh]):
+                report = audit_repository(tmp_dir, "dev-platform", include_ollama_analysis=False)
+
+            self.assertEqual(
+                [(u.package, u.from_version, u.to_version, u.update_type) for u in report.dashboard.detected_updates],
+                [
+                    ("@playwright/test", "1.63.0", "1.65.1", "minor"),
+                    ("@vitejs/plugin-vue", "6.0.5", "6.0.11", "patch"),
+                ],
+            )
+
+            empty_outdated = subprocess.CompletedProcess(
+                args=["npm", "outdated", "--workspaces", "--json"],
+                returncode=0,
+                stdout="{}",
+                stderr="",
+            )
+            with patch("core.maintenance.git_ops.run_command", return_value=empty_outdated):
+                updates = collect_direct_staging_updates(tmp_dir, report)
+
+            self.assertEqual(
+                [(u.package, u.from_version, u.to_version, u.update_type) for u in updates],
+                [
+                    ("@playwright/test", "1.63.0", "1.65.1", "minor"),
+                    ("@vitejs/plugin-vue", "6.0.5", "6.0.11", "patch"),
+                ],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

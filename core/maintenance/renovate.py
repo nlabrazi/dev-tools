@@ -49,6 +49,10 @@ NOTABLE_HEADING_RE = re.compile(r"#+\s*.*notable\s+changes", re.IGNORECASE)
 SEMVER_PARTS_RE = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?")
 DASHBOARD_MANAGER_RE = re.compile(r"<summary>([A-Za-z0-9_\-]+)\s*\(\d+\)</summary>")
 LOOKUP_WARNING_PKG_RE = re.compile(r"Failed to look up (?:npm )?package ([^:,\n`]+)", re.IGNORECASE)
+DETECTED_UPDATE_LINE_RE = re.compile(
+    r"^\s*-\s*`([^`\s]+)\s+([^`]+)`\s*(?:→|->)\s*\[Updates:\s*([^\]]+)\]",
+    re.MULTILINE,
+)
 
 
 def inspect_dependency_dashboard(repo_path: str) -> DependencyDashboardInfo:
@@ -112,6 +116,33 @@ def inspect_dependency_dashboard(repo_path: str) -> DependencyDashboardInfo:
     detected_managers = DASHBOARD_MANAGER_RE.findall(body)
     lookup_warnings = sorted({pkg.strip() for pkg in LOOKUP_WARNING_PKG_RE.findall(body) if pkg.strip()})
 
+    detected_updates: list[RenovateUpdateItem] = []
+    seen_detected_pkgs: set[str] = set()
+    for raw_pkg, raw_cur, raw_targets in DETECTED_UPDATE_LINE_RE.findall(body):
+        pkg_name = raw_pkg.strip()
+        if not pkg_name or pkg_name in seen_detected_pkgs:
+            continue
+        cur_clean = re.sub(r"^[~^>=<]+", "", raw_cur.strip()).lstrip("v")
+        candidates = [c.strip().strip("`") for c in re.findall(r"`([^`]+)`", raw_targets)]
+        if not candidates:
+            candidates = [c.strip().strip("`") for c in raw_targets.split(",") if c.strip()]
+        # Prefer first stable (non-prerelease) target version
+        target_raw = next((c for c in candidates if "-" not in c), candidates[0] if candidates else "")
+        target_clean = re.sub(r"^[~^>=<]+", "", target_raw).lstrip("v")
+        if not cur_clean or not target_clean or cur_clean == target_clean:
+            continue
+        upd_type = infer_semver_update_type(cur_clean, target_clean)
+        seen_detected_pkgs.add(pkg_name)
+        detected_updates.append(
+            RenovateUpdateItem(
+                package=pkg_name,
+                update_type=upd_type,
+                from_version=cur_clean,
+                to_version=target_clean,
+                raw_change=f"{cur_clean} -> {target_clean}",
+            )
+        )
+
     open_items: list[str] = []
     pending_items: list[str] = []
     current_section = ""
@@ -152,6 +183,7 @@ def inspect_dependency_dashboard(repo_path: str) -> DependencyDashboardInfo:
         pending_or_rate_limited_items=pending_items,
         detected_managers=detected_managers,
         lookup_warnings=lookup_warnings,
+        detected_updates=detected_updates,
         details=details,
     )
 
